@@ -27,6 +27,7 @@ import typer
 from asc_metadata_verifier.checks.deterministic import run_deterministic
 from asc_metadata_verifier.gate import evaluate
 from asc_metadata_verifier.guidelines.source import Guidelines, get_guidelines
+from asc_metadata_verifier.ingest.asc_api import AscApiAdapter
 from asc_metadata_verifier.ingest.base import IngestError
 from asc_metadata_verifier.ingest.fastlane import FastlaneAdapter
 from asc_metadata_verifier.ingest.yaml_source import YamlAdapter
@@ -57,6 +58,10 @@ def run_verify(
     *,
     path: str | Path | None = None,
     yaml_path: str | Path | None = None,
+    asc_api_app_id: str | None = None,
+    asc_api_key_id: str | None = None,
+    asc_api_issuer_id: str | None = None,
+    asc_api_key: str | Path | None = None,
     no_vision: bool = False,
     fail_on: str = "fail",
     guidelines_path: str | Path | None = None,
@@ -65,10 +70,18 @@ def run_verify(
 ) -> tuple[GateReport, bool]:
     """Run the full verification pipeline; return `(report, llm_skipped)`.
 
-    Adapter selection: `yaml_path` (if given) wins and uses `YamlAdapter`;
-    otherwise `path` is used with `FastlaneAdapter`. If neither is given,
-    raises `typer.BadParameter` (a usage error typer/click renders as an
-    actionable message with exit code 2, without a traceback).
+    Adapter selection precedence:
+      1. All four `--asc-api-*` values given -> `AscApiAdapter` (live App
+         Store Connect API fetch).
+      2. Else `yaml_path` given -> `YamlAdapter`.
+      3. Else `path` given -> `FastlaneAdapter`.
+      4. Else -> `typer.BadParameter` (a usage error typer/click renders as
+         an actionable message with exit code 2, without a traceback).
+
+    If *some but not all* of the four `--asc-api-*` values are given, that is
+    also a `typer.BadParameter` -- a partial ASC API credential set can never
+    produce a working adapter, so it is rejected rather than silently falling
+    back to fastlane/YAML.
 
     `no_vision` is accepted for CLI-shape stability only: vision checks are
     Phase 2 (Task 17) and are never run in this phase regardless of its value.
@@ -84,7 +97,29 @@ def run_verify(
 
     configure_logfire()
     with span("verify"):
-        if yaml_path is not None:
+        asc_api_fields = {
+            "--asc-api-app-id": asc_api_app_id,
+            "--asc-api-key-id": asc_api_key_id,
+            "--asc-api-issuer-id": asc_api_issuer_id,
+            "--asc-api-key": asc_api_key,
+        }
+        given = {name: value for name, value in asc_api_fields.items() if value is not None}
+
+        if given and len(given) < len(asc_api_fields):
+            missing = ", ".join(name for name in asc_api_fields if name not in given)
+            raise typer.BadParameter(
+                "Partial App Store Connect API credentials given -- "
+                f"missing {missing}. Provide all four --asc-api-* flags, or none."
+            )
+
+        if len(given) == len(asc_api_fields):
+            adapter = AscApiAdapter(
+                app_id=asc_api_app_id,
+                key_id=asc_api_key_id,
+                issuer_id=asc_api_issuer_id,
+                key_path=asc_api_key,
+            )
+        elif yaml_path is not None:
             adapter = YamlAdapter(yaml_path)
         elif path is not None:
             adapter = FastlaneAdapter(path)
@@ -130,6 +165,24 @@ def verify(
     yaml_path: Path | None = typer.Option(
         None, "--yaml", help="Use the YAML adapter on this file instead of fastlane."
     ),
+    asc_api_app_id: str | None = typer.Option(
+        None,
+        "--asc-api-app-id",
+        help="App Store Connect app id. Requires all other --asc-api-* flags too; "
+        "when all four are given, fetches live from the App Store Connect API "
+        "instead of fastlane/--yaml.",
+    ),
+    asc_api_key_id: str | None = typer.Option(
+        None, "--asc-api-key-id", help="App Store Connect API key id (from the .p8 key)."
+    ),
+    asc_api_issuer_id: str | None = typer.Option(
+        None, "--asc-api-issuer-id", help="App Store Connect API issuer id."
+    ),
+    asc_api_key: Path | None = typer.Option(
+        None,
+        "--asc-api-key",
+        help="Path to the App Store Connect API private key (.p8 file).",
+    ),
     no_vision: bool = typer.Option(
         False,
         "--no-vision",
@@ -157,6 +210,10 @@ def verify(
         report, llm_skipped = run_verify(
             path=path,
             yaml_path=yaml_path,
+            asc_api_app_id=asc_api_app_id,
+            asc_api_key_id=asc_api_key_id,
+            asc_api_issuer_id=asc_api_issuer_id,
+            asc_api_key=asc_api_key,
             no_vision=no_vision,
             fail_on=fail_on.value,
             guidelines_path=guidelines_path,

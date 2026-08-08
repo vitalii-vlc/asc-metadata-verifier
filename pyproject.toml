@@ -1,0 +1,41 @@
+[project]
+name = "asc-metadata-verifier"
+version = "0.1.0"
+description = "LLM-as-judge gate for App Store Connect metadata"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=50.0.0",
+    "httpx>=0.28.1",
+    "logfire>=4.40.0",
+    "pydantic>=2.13.4",
+    "pydantic-ai>=2.27.0",
+    "pydantic-evals>=2.27.0",
+    "pyjwt>=2.13.0",
+    "pyyaml>=6.0.3",
+    "rich>=15.0.0",
+    "typer>=0.27.1",
+]
+
+[project.scripts]
+asc-verify = "asc_metadata_verifier.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11.25,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.2",
+]

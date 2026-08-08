@@ -25,9 +25,10 @@ app would get rejected.
 ## Step 1: Identify the input
 
 The app's metadata is either:
-- a **fastlane `deliver` directory** — the parent of `metadata/` and
-  `screenshots/` (e.g. `./fastlane/metadata`, or the `deliver` root itself),
-  or
+- a **fastlane `deliver` root directory** — the directory that *contains*
+  `metadata/` and `screenshots/` (commonly `./fastlane`; NOT the `metadata/`
+  subdirectory itself — pointing `asc-verify` at `metadata/` fails with an
+  ingest error), or
 - a **single YAML or JSON file** in the tool's canonical metadata shape.
 
 If it's not obvious which one applies, ask, or look for a `fastlane/`
@@ -39,8 +40,8 @@ Always use `--format json` so the output is machine-parseable — do not rely
 on the human-readable Markdown report for decision-making.
 
 ```bash
-# fastlane deliver directory
-asc-verify ./fastlane/metadata --format json
+# fastlane deliver root (the parent of metadata/ and screenshots/)
+asc-verify ./fastlane --format json
 
 # single YAML/JSON metadata file
 asc-verify --yaml metadata.yaml --format json

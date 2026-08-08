@@ -66,7 +66,10 @@ class FastlaneAdapter:
         if not file_path.is_file():
             return None
 
-        value = file_path.read_text(encoding="utf-8").strip()
+        try:
+            value = file_path.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise IngestError(f"Could not read {file_path} as UTF-8 text: {exc}") from exc
         return value or None
 
     def _load_screenshots(self, locale: str) -> list[Screenshot]:

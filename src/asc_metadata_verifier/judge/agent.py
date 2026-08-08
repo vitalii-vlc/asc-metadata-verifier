@@ -8,8 +8,10 @@ from fabricating a guideline reference:
    grounding text it is given, and to return null when no grounding is present.
 2. Defensive post-processing (``judge_field``) authoritatively stamps the
    verdict's ``locale`` and ``dimension`` from the inputs, and forces
-   ``guideline_ref = None`` whenever the guidelines were unavailable -- so the
-   honesty constraint holds regardless of what the model returned.
+   ``guideline_ref = None`` whenever the grounding text actually used for
+   that call is empty -- which covers both ``guidelines.available is False``
+   and the available-but-empty case -- so the honesty constraint holds
+   regardless of what the model returned.
 """
 
 from __future__ import annotations

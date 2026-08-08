@@ -401,3 +401,93 @@ All checks passed!
 ```
 
 --- END PHASE 1 ---
+
+## Phase 2
+
+Two tasks, built on top of the Phase 1 pipeline: a live App Store Connect API
+ingest adapter (T16) and a vision judge over screenshots (T17). Both land in
+this branch (`feat/asc-verifier-implementation`) after Task 15's Phase 1
+close-out above; the README and this log were not updated at the time each
+landed, which is the honesty gap this section (and the fix wave that added
+it) closes.
+
+### T16 — App Store Connect API ingest adapter
+
+`src/asc_metadata_verifier/ingest/asc_api.py` adds `AscApiAdapter`, a third
+`IngestAdapter` implementation alongside `FastlaneAdapter`/`YamlAdapter`. It:
+
+- Authenticates with a **JWT signed ES256** (`PyJWT` + `cryptography`'s EC
+  P-256 key loading) built from an App Store Connect API key (`.p8` file,
+  key id, issuer id), per Apple's documented token scheme (`kid` header,
+  `iss`/`iat`/`exp`/`aud` claims, ≤20-minute TTL).
+- Fetches app-info localizations, App Store version localizations, and
+  screenshot asset URLs via `httpx`, and maps the JSON:API compound-document
+  response shape into the canonical `AppMetadata`/`LocaleMetadata`/
+  `Screenshot` models.
+- Wires into the CLI as four new flags — `--asc-api-app-id`,
+  `--asc-api-key-id`, `--asc-api-issuer-id`, `--asc-api-key` — selected only
+  when all four are given (a partial set is a `typer.BadParameter`, not a
+  silent fallback to fastlane/YAML).
+- Raises `IngestError` (never a raw traceback) for an unreadable/malformed
+  `.p8` key, a JWT signing failure, a network error, and 401/403/4xx/5xx
+  responses from the API.
+
+**Honesty note (unchanged from the module's own docstring): this adapter has
+NOT been validated against the real App Store Connect API.** There are no
+live ASC credentials in this dev environment. `tests/test_ingest_asc_api.py`
+exercises it entirely against `httpx.MockTransport` responses shaped like
+Apple's documented API (JSON:API `data`/`included` payloads matching the
+public API reference) and a throwaway EC P-256 key generated per test run —
+real JWT signing is genuinely exercised, but the actual HTTP contract (exact
+response shapes, pagination behavior beyond the documented single-page
+YAGNI limitation, real error payloads) is untested against a live account.
+
+### T17 — Vision screenshot judge
+
+`src/asc_metadata_verifier/judge/vision.py` adds a fourth judged artifact
+type — screenshots, not text fields — mirroring `judge/agent.py`'s pattern:
+one `pydantic_ai.Agent` with structured `RubricVerdict` output, run once per
+(screenshot, vision dimension), with the image bytes attached as
+**`pydantic_ai.BinaryContent`** (`media_type` derived from the image's byte
+signature, never trusted from the file extension). Four vision dimensions:
+`placeholder_image`, `other_platform_ui`, `misleading_screenshot`,
+`excessive_text`. Same two honesty layers as the text judge — the system
+prompt requires `guideline_ref` to be null when no grounding text is given,
+and defensive post-processing force-nulls it whenever the grounding actually
+used for that call was empty. A screenshot whose path is a remote URL, or
+that is missing/unreadable/not a decodable image, is skipped with a
+`logging.warning` rather than raising — judging continues with the rest.
+
+Wired into the CLI: the vision judge runs after the text judge whenever
+`--no-vision` is unset, a key/model is available, and the ingested metadata
+has at least one screenshot; its verdicts are appended to the same list
+passed to `evaluate()`, so vision findings gate the run exactly like text
+findings.
+
+**Honesty note (unchanged from the module's own docstring): real-model
+vision quality has NOT been measured.** `tests/test_vision.py` is entirely
+offline, served by a deterministic `pydantic_ai.models.function.FunctionModel`
+that inspects only the *text* portion of the prompt (it cannot see pixels) —
+it keys on the screenshot's filename (e.g. `bad.png` vs `good.png`) to return
+a controlled fail/pass verdict. This proves the plumbing (image bytes are
+genuinely attached and sent as `BinaryContent`, media type is derived from
+signature not extension, locale/dimension/field stamping, the skip path for
+unreadable/remote screenshots, and the honesty force-null rule) but proves
+nothing about whether a real model correctly judges real screenshot content.
+The gated `test_real_model_smoke` (`@pytest.mark.skipif` on
+`ANTHROPIC_API_KEY`) remains skipped in this environment, same as the
+text-judge and meta-eval real-model tests.
+
+### What this means for the README's Phase 1/2 status line
+
+The README previously stated Phase 2 (ASC-API ingest, vision judge) was "not
+yet built." That was accurate when written (end of Task 15) but went stale
+the moment T16/T17 landed in this same branch without a doc update — a real
+documentation/code mismatch, not a design decision. The README has been
+corrected (see its Status line and the `--asc-api-*`/`--no-vision` flag
+docs) to state plainly: Phase 2 code is shipped and tested, but — same as
+Phase 1's judge-quality caveat — neither the ASC-API adapter nor the vision
+judge has been exercised against the real service/model they target. No new
+accuracy or reliability numbers are claimed here; none were measured.
+
+--- END PHASE 2 ---

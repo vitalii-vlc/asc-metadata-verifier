@@ -74,3 +74,18 @@ def test_metadata_dir_with_no_locale_subdirs_raises_ingest_error(tmp_path):
 
     with pytest.raises(IngestError):
         FastlaneAdapter(root).load()
+
+
+def test_non_utf8_field_file_raises_actionable_ingest_error_not_raw_decode_error(tmp_path):
+    root = tmp_path / "deliver_root"
+    locale_dir = root / "metadata" / "en-US"
+    locale_dir.mkdir(parents=True)
+    # Latin-1 bytes (e.g. 0xE9 = "é") that are not valid UTF-8 on their own.
+    (locale_dir / "name.txt").write_bytes(b"Caf\xe9 App")
+
+    with pytest.raises(IngestError) as exc_info:
+        FastlaneAdapter(root).load()
+
+    message = str(exc_info.value)
+    assert "name.txt" in message
+    assert "utf-8" in message.lower()

@@ -287,6 +287,23 @@ class TestHttpErrors:
         with pytest.raises(IngestError):
             adapter.load()
 
+    def test_200_response_with_non_json_body_raises_ingest_error(self, tmp_path):
+        key_path = _write_test_key(tmp_path)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # A 2xx response whose body is not JSON (e.g. an HTML error page
+            # from a proxy/CDN in front of the real API) must not leak a raw
+            # json.JSONDecodeError -- it should become an actionable IngestError.
+            return httpx.Response(200, text="<html>not json</html>")
+
+        client = _client_with_handler(handler)
+        adapter = AscApiAdapter(
+            app_id=APP_ID, key_id=KEY_ID, issuer_id=ISSUER_ID, key_path=key_path, client=client
+        )
+
+        with pytest.raises(IngestError, match=r"(?i)json"):
+            adapter.load()
+
 
 class TestCliAscApiWiring:
     """CLI wiring for the deferred --asc-api-* flags (fulfills the Task 12 deferral)."""

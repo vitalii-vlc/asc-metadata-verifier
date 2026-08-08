@@ -247,4 +247,14 @@ class AscApiAdapter:
                 f"HTTP {response.status_code} {response.text[:200]}"
             )
 
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            # `httpx.Response.json()` raises `json.JSONDecodeError` (a
+            # `ValueError` subclass) for a 2xx response with a non-JSON body.
+            # Never let that raw error surface -- turn it into an actionable
+            # IngestError like every other failure mode of this adapter.
+            raise IngestError(
+                f"App Store Connect API response from {path} was not valid JSON "
+                f"(HTTP {response.status_code}): {exc}"
+            ) from exc

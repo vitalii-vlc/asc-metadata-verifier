@@ -233,6 +233,14 @@ def verify(
     except IngestError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from None
+    except (FileNotFoundError, OSError, ValueError):
+        # `get_guidelines(override_path=...)` raises FileNotFoundError/OSError
+        # for a missing/unreadable --guidelines override file, and ValueError
+        # for an invalid session id -- neither is an IngestError, so without
+        # this handler a bad --guidelines path leaks a raw traceback instead
+        # of the actionable "no tracebacks" message the rest of the CLI gives.
+        typer.echo(f"Error: guidelines file not found: {guidelines_path}", err=True)
+        raise typer.Exit(code=2) from None
 
     if output_format is OutputFormat.json:
         # Raw JSON only on stdout (no rich decoration) so it stays pipeable/parseable.

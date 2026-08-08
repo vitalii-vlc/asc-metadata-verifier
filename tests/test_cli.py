@@ -102,6 +102,22 @@ class TestIngestErrorPath:
         assert result.exit_code == 2
         assert "Traceback" not in result.output
 
+    def test_nonexistent_guidelines_override_exits_2_with_actionable_message(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        result = runner.invoke(
+            cli.app,
+            [FIXTURE_ROOT, "--guidelines", "tests/fixtures/does_not_exist_guidelines.html"],
+        )
+
+        assert result.exit_code == 2, result.output
+        assert "Traceback" not in result.output
+        assert result.output.strip() != ""
+        assert "guidelines" in result.output.lower()
+        # The raw FileNotFoundError must never propagate out of the command --
+        # it's caught and translated into a clean typer.Exit(code=2).
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
 
 class TestJudgePath:
     def test_canned_fail_verdict_yields_block_and_exit_1(self, monkeypatch):

@@ -4,7 +4,17 @@ One ``Case`` per JSONL line (so ``len(dataset.cases)`` equals the number of
 labeled rows). ``inputs`` carry what the meta-eval task needs to run the judge
 (text, locale, field, and the labeled dimension-under-test); ``expected_output``
 carries the ground-truth label (dimension + verdict) that the meta-eval scores
-against. The raw ``source_note`` rationale is kept in ``metadata`` for auditing.
+against. ``metadata`` keeps the raw ``source_note`` rationale plus the
+``also_valid_dimensions`` MULTI-LABEL ground truth (see below) for auditing and
+scoring.
+
+Multi-label ground truth: real metadata can genuinely trip more than one
+dimension (competitor brand names are both keyword-stuffing AND a third-party
+trademark; "cheaper ... on our website" is both an off-platform link AND a price
+term). ``expected_dimension`` is the single PRIMARY label; the optional
+``also_valid_dimensions`` list names OTHER dimensions genuinely present, so that
+a judge flag on them is an accepted secondary detection rather than a false
+positive. Single-label ground truth would falsely penalize a correct judge.
 
 Honesty note: the labels in ``golden/*.jsonl`` ARE the credential. Every row is
 a realistic SYNTHETIC example grounded in the 8 rubric dimensions and the real
@@ -99,6 +109,20 @@ def _validate_row(row: dict, filename: str, lineno: int) -> None:
         )
     if not str(row["text"]).strip():
         raise ValueError(f"{filename}:{lineno}: empty text")
+    # Multi-label ground truth (optional): each entry must be a real dimension,
+    # distinct from the primary label, and not repeated.
+    also_valid = row.get("also_valid_dimensions", [])
+    if not isinstance(also_valid, list):
+        raise ValueError(f"{filename}:{lineno}: also_valid_dimensions must be a list")
+    if len(set(also_valid)) != len(also_valid):
+        raise ValueError(f"{filename}:{lineno}: duplicate also_valid_dimensions {also_valid}")
+    for entry in also_valid:
+        if entry not in _DIMENSION_IDS:
+            raise ValueError(f"{filename}:{lineno}: bad also_valid_dimension {entry!r}")
+        if entry == dim:
+            raise ValueError(
+                f"{filename}:{lineno}: also_valid_dimension duplicates expected_dimension {entry!r}"
+            )
 
 
 def count_golden_lines() -> int:
@@ -131,7 +155,11 @@ def build_dataset() -> Dataset[CaseInputs, CaseExpected, dict]:
                 name=name,
                 inputs=inputs,
                 expected_output=expected,
-                metadata={"source_note": row["source_note"], "field": row["field"]},
+                metadata={
+                    "source_note": row["source_note"],
+                    "field": row["field"],
+                    "also_valid_dimensions": list(row.get("also_valid_dimensions", [])),
+                },
             )
         )
     return Dataset(name="asc-golden", cases=cases)

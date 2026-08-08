@@ -18,6 +18,20 @@ Methodology (full grid, one-vs-rest):
   key gate: offline (FunctionModel) it is free; the real-model path is
   N_cases x 8 calls and gated behind ANTHROPIC_API_KEY. No cases are skipped.
 
+  MULTI-LABEL ground truth: real metadata can genuinely trip more than one
+  dimension, so each case has a PRIMARY label (``expected_dimension``) plus an
+  optional ``also_valid_dimensions`` list of other genuinely-present dimensions.
+  A judge flag on dimension D for a case is a FALSE POSITIVE only if
+  ``D != expected_dimension AND D not in also_valid_dimensions``. A flag on an
+  also_valid dimension is an ACCEPTED SECONDARY detection: that (case, dim) cell
+  is excluded from D's TP/FP/FN/TN entirely (a flag is tallied in
+  ``accepted_secondary_detections``, a non-flag is ignored) -- so it neither
+  rewards recall nor penalizes precision. Recall stays keyed purely on the
+  primary ``expected_dimension`` (TP/FN arise only from primary-label cells).
+  Without this, single-label scoring would falsely penalize a correct judge --
+  e.g. competitor brand names in a keyword-stuffing case ARE also third-party
+  trademarks, and flagging them is correct, not an error.
+
   Per dimension D:  precision = TP / (TP + FP),  recall = TP / (TP + FN).
   Zero-denominator convention (documented): reported as 0.0 (sklearn's default),
   so a judge that never flags D does not get a misleading precision of 1.0.
@@ -101,6 +115,10 @@ class MetaEvalReport:
     failure_taxonomy: dict[str, list[FailureRecord]]
     per_dimension_counts: dict[str, dict[str, int]]
     n_cases: int
+    # Multi-label accounting: a judge flag on a case's `also_valid_dimensions`
+    # is an ACCEPTED secondary detection -- counted here, and deliberately NOT
+    # counted as FP (precision) nor TP/FN (recall). See BUILD_LOG methodology.
+    accepted_secondary_detections: int = 0
 
     def total_failures(self) -> int:
         return sum(len(v) for v in self.failure_taxonomy.values())
@@ -158,6 +176,7 @@ def _aggregate(report: EvaluationReport) -> MetaEvalReport:
     taxonomy: dict[str, list[FailureRecord]] = {cat: [] for cat in _CATEGORIES}
     correct_cases = 0
     n_cases = 0
+    accepted_secondary = 0
 
     for rc in report.cases:
         n_cases += 1
@@ -166,19 +185,28 @@ def _aggregate(report: EvaluationReport) -> MetaEvalReport:
         out: GridOutput = rc.output
         exp_dim = expected.expected_dimension
         exp_verdict = expected.expected_verdict
+        also_valid: set[str] = set((rc.metadata or {}).get("also_valid_dimensions", []))
         snippet = _snippet(inp.text)
 
         flagged_dims = [dim for dim in _DIM_IDS if out.cells[dim].flagged]
+        # A flag counts as a genuine (false) positive only if it is neither the
+        # primary label nor a genuinely-present secondary dimension.
+        wrong_flags = [d for d in flagged_dims if d != exp_dim and d not in also_valid]
 
-        # --- grid counts (one-vs-rest per dimension) ---
+        # --- grid counts (one-vs-rest per dimension, multi-label aware) ---
         for dim in _DIM_IDS:
             judged_flag = out.cells[dim].flagged
-            truth_flag = dim == exp_dim and exp_verdict in FLAGGED
-            if truth_flag and judged_flag:
-                counts[dim]["TP"] += 1
-            elif truth_flag and not judged_flag:
-                counts[dim]["FN"] += 1
-            elif (not truth_flag) and judged_flag:
+            is_target = dim == exp_dim and exp_verdict in FLAGGED
+            if is_target:
+                # recall stays keyed on expected_dimension (unchanged)
+                counts[dim]["TP" if judged_flag else "FN"] += 1
+            elif dim in also_valid:
+                # accepted secondary label: excluded from this dim's TP/FP/FN/TN.
+                # A flag here is an accepted detection (tallied); a non-flag is
+                # ignored -- neither rewards nor penalizes precision/recall.
+                if judged_flag:
+                    accepted_secondary += 1
+            elif judged_flag:
                 counts[dim]["FP"] += 1
             else:
                 counts[dim]["TN"] += 1
@@ -203,29 +231,27 @@ def _aggregate(report: EvaluationReport) -> MetaEvalReport:
                         target.verdict, snippet,
                     )
                 )
-                other = [dim for dim in flagged_dims if dim != exp_dim]
-                if other:  # missed target but flagged something else
+                if wrong_flags:  # missed target but flagged an off-label dimension
                     taxonomy["wrong_dimension"].append(
                         FailureRecord(
                             rc.name, exp_dim, "wrong_dimension", exp_verdict,
-                            "pass", snippet, f"judge instead flagged: {', '.join(other)}",
+                            "pass", snippet, f"judge instead flagged: {', '.join(wrong_flags)}",
                         )
                     )
-            # cross-dimension false positives on a positive case
-            for dim in flagged_dims:
-                if dim != exp_dim:
-                    taxonomy["false_positive"].append(
-                        FailureRecord(
-                            rc.name, dim, "false_positive", "pass",
-                            out.cells[dim].verdict, snippet,
-                            "extra flag on a non-labeled dimension",
-                        )
+            # cross-dimension false positives (excludes accepted also_valid dims)
+            for dim in wrong_flags:
+                taxonomy["false_positive"].append(
+                    FailureRecord(
+                        rc.name, dim, "false_positive", "pass",
+                        out.cells[dim].verdict, snippet,
+                        "extra flag on a non-labeled, non-also_valid dimension",
                     )
-        else:  # clean control: correct iff nothing flagged
-            if not flagged_dims:
+                )
+        else:  # clean control: correct iff nothing WRONGLY flagged
+            if not wrong_flags:
                 correct_cases += 1
             else:
-                for dim in flagged_dims:
+                for dim in wrong_flags:
                     taxonomy["false_positive"].append(
                         FailureRecord(
                             rc.name, dim, "false_positive", "pass",
@@ -245,6 +271,7 @@ def _aggregate(report: EvaluationReport) -> MetaEvalReport:
         failure_taxonomy=taxonomy,
         per_dimension_counts=counts,
         n_cases=n_cases,
+        accepted_secondary_detections=accepted_secondary,
     )
 
 
@@ -270,4 +297,19 @@ def run(
 
     task = _make_task(model, guidelines)
     report = dataset.evaluate_sync(task, progress=False)
+
+    # Guard the denominator: evaluate_sync shunts any task that RAISED (e.g. a
+    # failed real-model call) into `report.failures`, silently shrinking the
+    # scored set. On the real-model path (`model is None`) that must be a hard
+    # error, not a quietly smaller denominator that inflates rates in Task 15.
+    expected_n = len(dataset.cases)
+    scored_n = len(report.cases)
+    task_failures = getattr(report, "failures", []) or []
+    if model is None and (scored_n != expected_n or task_failures):
+        raise RuntimeError(
+            f"real-model meta-eval scored {scored_n}/{expected_n} cases "
+            f"({len(task_failures)} task failures); refusing to report agreement "
+            "stats over a silently shrunken denominator"
+        )
+
     return _aggregate(report)

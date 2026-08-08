@@ -67,13 +67,23 @@ def _always_fail() -> FunctionModel:
     return _model(lambda _text: ("fail", "high", "x"))
 
 
-def _oracle() -> FunctionModel:
-    """A perfect judge: flags iff the queried dimension is the case's label."""
-    # (text, expected_dimension, expected_verdict), longest-text first so a
-    # case text that is a substring of another never shadows the real match.
+def _oracle(flag_secondary: bool = False) -> FunctionModel:
+    """A perfect judge: flags iff the queried dimension is the case's label.
+
+    When ``flag_secondary`` is True it ALSO flags each case's genuine
+    ``also_valid_dimensions`` -- used to prove that an accepted secondary
+    detection is not scored as a false positive.
+    """
+    # (text, expected_dimension, expected_verdict, also_valid), longest-text
+    # first so a case text that is a substring of another never shadows it.
     lookup = sorted(
         (
-            (c.inputs.text, c.expected_output.expected_dimension, c.expected_output.expected_verdict)  # noqa: E501
+            (
+                c.inputs.text,
+                c.expected_output.expected_dimension,
+                c.expected_output.expected_verdict,
+                tuple(c.metadata.get("also_valid_dimensions", [])),
+            )
             for c in build_dataset().cases
         ),
         key=lambda t: len(t[0]),
@@ -83,10 +93,12 @@ def _oracle() -> FunctionModel:
     def fn(prompt: str):
         match = _DIM_LINE_RE.search(prompt)
         queried_dim = match.group(1) if match else ""
-        for text, exp_dim, exp_verdict in lookup:
+        for text, exp_dim, exp_verdict, also_valid in lookup:
             if text in prompt:
                 if exp_dim == queried_dim and exp_verdict in {"warn", "fail"}:
                     return (exp_verdict, _SEVERITY_FOR[exp_verdict], text[:40])
+                if flag_secondary and queried_dim in also_valid:
+                    return ("fail", "high", "secondary")
                 return ("pass", "low", None)
         return ("pass", "low", None)
 
@@ -178,6 +190,52 @@ def test_failure_taxonomy_captures_false_positives_on_clean_controls():
     assert fps[0].category == "false_positive"
     assert fps[0].got_verdict in {"warn", "fail"}
     assert fps[0].text_snippet
+
+
+def test_dataset_carries_multi_label_ground_truth():
+    """The 4 audited cross-dimension cases expose their genuine second label."""
+    by_name = {c.name: c for c in build_dataset().cases}
+    expected = {
+        "15-keyword_stuffing": ["third_party_trademark"],
+        "17-keyword_stuffing": ["third_party_trademark"],
+        "24-unauthorized_contact_links": ["price_terms_in_description"],
+        "25-unauthorized_contact_links": ["third_party_trademark"],
+    }
+    n_multi = 0
+    for case in by_name.values():
+        also = case.metadata.get("also_valid_dimensions", [])
+        # every also_valid entry is a real dimension distinct from the primary
+        for entry in also:
+            assert entry in DIM_IDS
+            assert entry != case.expected_output.expected_dimension
+        if also:
+            n_multi += 1
+    assert n_multi == 4
+    for name, also in expected.items():
+        assert by_name[name].metadata["also_valid_dimensions"] == also
+
+
+def test_also_valid_flag_is_accepted_not_false_positive():
+    """A judge flag on a case's genuine SECOND dimension must NOT be an FP.
+
+    The stub flags each case's `also_valid_dimensions` in addition to its
+    primary label. Under single-label scoring the 3 third_party_trademark
+    secondary flags would drag its precision to 4/(4+3)=0.571; multi-label
+    ground truth keeps it at 1.0 and records zero false positives.
+    """
+    report = run(model=_oracle(flag_secondary=True))
+    # the judge DID flag secondary dimensions ...
+    assert report.accepted_secondary_detections == 4
+    # ... yet none of those are counted as false positives (rule works) ...
+    assert report.failure_taxonomy["false_positive"] == []
+    assert report.total_failures() == 0
+    # ... and precision on the "hardest" dimension is not depressed.
+    assert report.per_dimension_precision["third_party_trademark"] == 1.0
+    assert report.per_dimension_precision["price_terms_in_description"] == 1.0
+    assert report.accuracy == 1.0
+    # recall stays keyed on the PRIMARY label only (secondary flags never TP/FN)
+    for dim in DIM_IDS:
+        assert report.per_dimension_recall[dim] == 1.0
 
 
 @pytest.mark.skipif(

@@ -132,3 +132,52 @@ def test_missing_file_raises_actionable_ingest_error(tmp_path):
 
     message = str(exc_info.value)
     assert str(missing_path) in message
+
+
+def test_locales_as_list_raises_ingest_error(tmp_path):
+    yaml_path = tmp_path / "locales_list.yaml"
+    yaml_path.write_text("locales: [en-US, de-DE]\n")
+
+    with pytest.raises(IngestError) as exc_info:
+        YamlAdapter(yaml_path).load()
+
+    message = str(exc_info.value)
+    assert str(yaml_path) in message
+
+
+def test_locales_as_string_raises_ingest_error(tmp_path):
+    yaml_path = tmp_path / "locales_string.yaml"
+    yaml_path.write_text('locales: "en-US"\n')
+
+    with pytest.raises(IngestError):
+        YamlAdapter(yaml_path).load()
+
+
+def test_screenshot_value_as_string_raises_ingest_error(tmp_path):
+    yaml_path = tmp_path / "screenshots_string.yaml"
+    yaml_path.write_text(
+        """
+locales:
+  en-US:
+    app_name: "App"
+screenshots:
+  en-US: "one.png"
+"""
+    )
+
+    with pytest.raises(IngestError) as exc_info:
+        YamlAdapter(yaml_path).load()
+
+    message = str(exc_info.value)
+    assert str(yaml_path) in message
+
+
+def test_non_utf8_yaml_raises_actionable_ingest_error(tmp_path):
+    yaml_path = tmp_path / "invalid_utf8.yaml"
+    yaml_path.write_bytes(b"\xff\xfe locales:")
+
+    with pytest.raises(IngestError) as exc_info:
+        YamlAdapter(yaml_path).load()
+
+    message = str(exc_info.value)
+    assert str(yaml_path) in message

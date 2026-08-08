@@ -43,7 +43,10 @@ class YamlAdapter:
     def load(self) -> AppMetadata:
         raw = self._read_yaml()
 
-        if not isinstance(raw, dict) or not raw.get("locales"):
+        if not isinstance(raw, dict):
+            raise IngestError(f"Top-level YAML in {self._path} is not a mapping")
+
+        if not isinstance(raw.get("locales"), dict) or not raw["locales"]:
             raise IngestError(f"No 'locales' found in {self._path}")
 
         locales = [
@@ -62,7 +65,7 @@ class YamlAdapter:
     def _read_yaml(self) -> Any:
         try:
             text = self._path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise IngestError(f"Could not read YAML at {self._path}: {exc}") from exc
 
         try:
@@ -76,14 +79,20 @@ class YamlAdapter:
         filtered = {k: v for k, v in known_fields.items() if k in _LOCALE_FIELDS}
         return LocaleMetadata(locale=locale_code, **filtered)
 
-    @staticmethod
-    def _load_screenshots(screenshots_by_locale: Any) -> list[Screenshot]:
+    def _load_screenshots(self, screenshots_by_locale: Any) -> list[Screenshot]:
         if not isinstance(screenshots_by_locale, dict):
             return []
 
         screenshots: list[Screenshot] = []
         for locale_code, paths in screenshots_by_locale.items():
-            for path in paths or []:
+            if paths is None:
+                continue
+            if not isinstance(paths, list):
+                raise IngestError(
+                    f"Expected a list of screenshot paths for locale "
+                    f"'{locale_code}' in {self._path}, got {type(paths).__name__}"
+                )
+            for path in paths:
                 screenshots.append(Screenshot(locale=locale_code, path=str(path)))
 
         return screenshots

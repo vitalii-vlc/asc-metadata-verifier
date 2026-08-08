@@ -96,7 +96,7 @@ pyproject.toml  README.md  BUILD_LOG.md
 
 ### Task 5: Deterministic checks
 **Files:** Create `src/asc_metadata_verifier/checks/deterministic.py`, `tests/test_deterministic.py`
-**Interfaces:** Consumes `AppMetadata`. Produces `run_deterministic(meta) -> list[DeterministicFinding{locale,field,kind,detail}]`. Kinds: `over_limit`, `missing_required`, `placeholder`, `malformed_url`. Placeholder regex set: `\blorem\b`, `\bipsum\b`, `TODO`, `XXX`, `FIXME`, `placeholder`, `\bTBD\b` (case-insensitive).
+**Interfaces:** Consumes `AppMetadata`. Produces `run_deterministic(meta) -> list[DeterministicFinding{locale,field,kind,detail}]`. Kinds: `over_limit`, `missing_required`, `placeholder`, `malformed_url`. Placeholder regex set (all word-boundary anchored, case-insensitive): `\blorem\b`, `\bipsum\b`, `\bTODO\b`, `\bXXX\b`, `\bFIXME\b`, `\bplaceholder\b`, `\bTBD\b`. (Revised 2026-08-08 by Vitalii's decision during execution: the original set left `TODO`/`XXX`/`FIXME`/`placeholder` unanchored, causing substring false positives e.g. "placeholders", "Maxxx"; anchored to match the lorem/ipsum/TBD style.)
 
 - [ ] **Step 1:** Test on a fixture with `description="Lorem ipsum TODO"`, `app_name` 31 chars, empty `keywords`, `support_url="notaurl"` → expect findings of kinds `placeholder`, `over_limit`, `missing_required`, `malformed_url`. Assert a clean fixture yields `[]`.
 - [ ] **Step 2:** Run → FAIL. **Step 3:** Implement (LLM-free). **Step 4:** PASS. **Step 5:** Commit: `feat: deterministic pre-checks (limits, placeholders, urls)`

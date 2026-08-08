@@ -133,7 +133,8 @@ def judge_field(
     One agent run per pair. After each run the verdict's ``locale`` and
     ``dimension`` are set authoritatively from the inputs (the model is not
     trusted to echo them), and ``guideline_ref`` is forced to None whenever the
-    guidelines were unavailable.
+    grounding text actually used for that call is empty/falsy (which covers both
+    ``guidelines.available is False`` and available-but-empty guidelines).
     """
     agent = build_judge(model)
     verdicts: list[RubricVerdict] = []
@@ -147,7 +148,12 @@ def judge_field(
                 "locale": locale_meta.locale,
                 "dimension": dimension.id,
             }
-            if not guidelines.available:
+            # Force-None keys on the grounding ACTUALLY USED for this call, not
+            # merely on `guidelines.available`: `_grounding_for` can return ""
+            # even when available is True (empty text + sections), and in that
+            # case the prompt already told the model to return null -- so layer 2
+            # must agree with layer 1 and scrub any ref regardless.
+            if not grounding:
                 update["guideline_ref"] = None
             verdicts.append(result.output.model_copy(update=update))
     return verdicts

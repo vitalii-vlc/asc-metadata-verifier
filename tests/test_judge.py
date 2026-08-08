@@ -182,6 +182,37 @@ def test_honesty_guideline_ref_forced_none_when_guidelines_unavailable():
     assert [v.dimension for v in verdicts] == [d.id for d in DIMENSIONS]
 
 
+def test_honesty_guideline_ref_forced_none_when_available_but_grounding_empty():
+    """available is True but text+sections are empty -> grounding used is "".
+
+    Layer 2 must agree with layer 1: an empty grounding string forces
+    guideline_ref to None even though `guidelines.available` is True.
+    """
+    guidelines = Guidelines(available=True, text="", sections={}, source="x")
+    meta = AppMetadata(
+        locales=[LocaleMetadata(locale="en-US", description="Also available on Android.")]
+    )
+
+    def factory(_text: str) -> RubricVerdict:
+        return RubricVerdict(
+            dimension="bogus-dimension",
+            verdict="warn",
+            severity="medium",
+            confidence=0.8,
+            rationale="Model tried to cite a guideline it was not given.",
+            offending_quote="Android",
+            guideline_ref="2.3.99",  # invented; must be scrubbed
+            locale="bogus-locale",
+            field="description",
+        )
+
+    verdicts = judge_field(meta, guidelines, DIMENSIONS, model=_model(factory))
+
+    assert len(verdicts) == len(DIMENSIONS)
+    for v in verdicts:
+        assert v.guideline_ref is None
+
+
 def test_locale_and_dimension_are_authoritative_across_cross_product():
     meta = AppMetadata(
         locales=[
@@ -234,6 +265,31 @@ def test_build_judge_accepts_a_model_instance():
 
     agent = build_judge(model=_model(factory))
     assert agent is not None
+
+
+def test_build_judge_default_is_keyless_and_uses_default_model(monkeypatch):
+    """HARD constraint: offline-safe by construction + default claude-sonnet-5.
+
+    No ANTHROPIC_API_KEY and no ASC_JUDGE_MODEL: constructing the default judge
+    must NOT raise (keyless construction via defer_model_check=True), and its
+    configured model reference must reflect the `claude-sonnet-5` default.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ASC_JUDGE_MODEL", raising=False)
+
+    agent = build_judge()  # must not raise without a key
+
+    assert "claude-sonnet-5" in str(agent.model)
+
+
+def test_build_judge_respects_asc_judge_model_env(monkeypatch):
+    """HARD constraint: ASC_JUDGE_MODEL overrides the default, still keyless."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ASC_JUDGE_MODEL", "claude-opus-4-8")
+
+    agent = build_judge()  # must not raise without a key
+
+    assert "claude-opus-4-8" in str(agent.model)
 
 
 @pytest.mark.skipif(

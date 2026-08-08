@@ -54,22 +54,21 @@ SYSTEM_PROMPT = (
     "you observed."
 )
 
-# Recognized image signatures. Deliberately minimal (no OCR, no image
-# preprocessing, no third-party image library) -- just enough to avoid
-# handing a non-image file to the vision model.
+# Recognized image signatures, and the media type each one identifies.
+# Deliberately minimal (no OCR, no image preprocessing, no third-party image
+# library) -- just enough to avoid handing a non-image file to the vision
+# model. This is the SINGLE SOURCE OF TRUTH for `BinaryContent.media_type`:
+# it is derived from the matched signature (the actual bytes), never from the
+# file's extension, which can lie (a `.jpg`-named file containing PNG bytes,
+# or vice versa) -- `BinaryContent.media_type` is sent to the model verbatim
+# and is not re-sniffed downstream, so an extension-derived type can silently
+# mislabel the image.
 _IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"GIF87a", "image/gif"),
     (b"GIF89a", "image/gif"),
 )
-
-_SUFFIX_MEDIA_TYPES: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-}
-_DEFAULT_MEDIA_TYPE = "image/png"
 
 
 @dataclass(frozen=True)
@@ -137,15 +136,14 @@ def build_vision_judge(model: Model | str | None = None) -> Agent[None, RubricVe
     return Agent(model, output_type=RubricVerdict, system_prompt=SYSTEM_PROMPT)
 
 
-def _media_type_for(path: Path) -> str:
-    return _SUFFIX_MEDIA_TYPES.get(path.suffix.lower(), _DEFAULT_MEDIA_TYPE)
-
-
-def _read_image(screenshot: Screenshot) -> bytes | None:
+def _read_image(screenshot: Screenshot) -> tuple[bytes, str] | None:
     """Read and sanity-check local image bytes, or return None to skip.
 
-    Returns None (logging a warning) when the path is a remote URL, the file
-    is missing/unreadable, or the bytes don't match a recognized image
+    Returns `(data, media_type)`, where `media_type` is derived from the
+    matched entry in `_IMAGE_SIGNATURES` (the actual bytes), NOT the file's
+    extension -- see the module-level comment on `_IMAGE_SIGNATURES`. Returns
+    None (logging a warning) when the path is a remote URL, the file is
+    missing/unreadable, or the bytes don't match a recognized image
     signature. Never raises.
     """
     if screenshot.path.startswith("http://") or screenshot.path.startswith("https://"):
@@ -163,14 +161,15 @@ def _read_image(screenshot: Screenshot) -> bytes | None:
         logger.warning("vision judge: skipping unreadable screenshot %s: %s", path, exc)
         return None
 
-    if not any(data.startswith(sig) for sig, _media_type in _IMAGE_SIGNATURES):
-        logger.warning(
-            "vision judge: skipping %s -- not a decodable image (unrecognized signature)",
-            path,
-        )
-        return None
+    for signature, media_type in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return data, media_type
 
-    return data
+    logger.warning(
+        "vision judge: skipping %s -- not a decodable image (unrecognized signature)",
+        path,
+    )
+    return None
 
 
 def _grounding_for(guidelines: Guidelines, dimension: VisionDimension) -> str:
@@ -180,6 +179,12 @@ def _grounding_for(guidelines: Guidelines, dimension: VisionDimension) -> str:
     Screenshots don't map to one specific guideline section the way text
     rubric dimensions do (via `guideline_hint`), so this falls back to the
     general accurate-metadata section (2.3) or the raw guidelines text.
+
+    Documented simplification: `dimension` is accepted for signature symmetry
+    with the text judge's `judge.agent._grounding_for`, but is currently
+    unused -- ALL 4 `VISION_DIMENSIONS` share this same grounding text (there
+    is no per-dimension `guideline_hint` for vision, unlike `RubricDimension`
+    in `judge.rubric`).
     """
     if not guidelines.available:
         return ""
@@ -240,11 +245,11 @@ def judge_screenshots(
     verdicts: list[RubricVerdict] = []
 
     for screenshot in screenshots:
-        image_bytes = _read_image(screenshot)
-        if image_bytes is None:
+        image = _read_image(screenshot)
+        if image is None:
             continue
+        image_bytes, media_type = image
 
-        media_type = _media_type_for(Path(screenshot.path))
         for dimension in VISION_DIMENSIONS:
             grounding = _grounding_for(guidelines, dimension)
             prompt = _build_prompt(dimension, screenshot, grounding)

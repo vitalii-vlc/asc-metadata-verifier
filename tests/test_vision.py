@@ -14,6 +14,7 @@ offline -- it does NOT prove real-model vision quality.
 """
 
 import logging
+from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import BinaryContent, ModelResponse, ToolCallPart, UserPromptPart
@@ -54,6 +55,16 @@ def _user_text_and_images(messages) -> tuple[str, int]:
                         elif isinstance(item, BinaryContent):
                             image_count += 1
     return "\n".join(text_chunks), image_count
+
+
+def _user_binary_contents(messages) -> list[BinaryContent]:
+    """Collect every BinaryContent part attached to any user prompt."""
+    found: list[BinaryContent] = []
+    for msg in messages:
+        for part in getattr(msg, "parts", []):
+            if isinstance(part, UserPromptPart) and not isinstance(part.content, str):
+                found.extend(item for item in part.content if isinstance(item, BinaryContent))
+    return found
 
 
 def _model(verdict_factory) -> FunctionModel:
@@ -161,6 +172,45 @@ def test_image_bytes_are_actually_sent_to_the_model():
     judge_screenshots(screenshots, guidelines, model=FunctionModel(fn))
 
     assert seen_image_counts == [1] * len(VISION_DIMENSIONS)
+
+
+def test_media_type_is_derived_from_signature_not_extension_gif():
+    """A .gif screenshot must be sent as media_type='image/gif', not the
+    extension-agnostic PNG fallback the old (buggy) suffix-based lookup used.
+    """
+    guidelines = Guidelines(available=False, text="", sections={}, source="offline")
+    screenshots = [Screenshot(locale="en-US", path=f"{FIXTURE_DIR}/good.gif")]
+    seen_media_types: list[str] = []
+
+    def fn(messages, info: AgentInfo) -> ModelResponse:
+        seen_media_types.extend(bc.media_type for bc in _user_binary_contents(messages))
+        tool_name = info.output_tools[0].name
+        return ModelResponse(parts=[ToolCallPart(tool_name, _bogus_verdict().model_dump())])
+
+    judge_screenshots(screenshots, guidelines, model=FunctionModel(fn))
+
+    assert seen_media_types == ["image/gif"] * len(VISION_DIMENSIONS)
+
+
+def test_media_type_is_derived_from_signature_not_extension_mislabeled_png(tmp_path):
+    """PNG bytes saved with a misleading `.jpg` extension must still be sent
+    as media_type='image/png' -- the extension is never trusted.
+    """
+    guidelines = Guidelines(available=False, text="", sections={}, source="offline")
+    png_bytes = Path(f"{FIXTURE_DIR}/good.png").read_bytes()
+    mislabeled = tmp_path / "actually_a_png.jpg"
+    mislabeled.write_bytes(png_bytes)
+    screenshots = [Screenshot(locale="en-US", path=str(mislabeled))]
+    seen_media_types: list[str] = []
+
+    def fn(messages, info: AgentInfo) -> ModelResponse:
+        seen_media_types.extend(bc.media_type for bc in _user_binary_contents(messages))
+        tool_name = info.output_tools[0].name
+        return ModelResponse(parts=[ToolCallPart(tool_name, _bogus_verdict().model_dump())])
+
+    judge_screenshots(screenshots, guidelines, model=FunctionModel(fn))
+
+    assert seen_media_types == ["image/png"] * len(VISION_DIMENSIONS)
 
 
 def test_missing_file_is_skipped_with_warning_and_run_continues(caplog):
@@ -281,6 +331,41 @@ def test_honesty_guideline_ref_forced_none_when_available_but_grounding_empty():
 
     for v in verdicts:
         assert v.guideline_ref is None
+
+
+def test_honesty_valid_guideline_ref_survives_when_grounding_is_present():
+    """Positive path: a real, non-empty grounding + a VALID guideline_ref the
+    model cites from it must NOT be scrubbed -- honesty enforcement only
+    forces None when the grounding actually used is empty/falsy, never
+    unconditionally.
+    """
+    guidelines = Guidelines(
+        available=True,
+        text="2.3 Accurate Metadata.",
+        sections={"2.3": "2.3 Accurate Metadata. Screenshots must reflect the app in use."},
+        source="test",
+    )
+    screenshots = [Screenshot(locale="en-US", path=f"{FIXTURE_DIR}/good.png")]
+
+    def fn(_messages, info: AgentInfo) -> ModelResponse:
+        verdict = RubricVerdict(
+            dimension="bogus",
+            verdict="warn",
+            severity="medium",
+            confidence=0.8,
+            rationale="Cited the grounding text it was actually given.",
+            guideline_ref="2.3",
+            locale="bogus",
+            field="bogus",
+        )
+        tool_name = info.output_tools[0].name
+        return ModelResponse(parts=[ToolCallPart(tool_name, verdict.model_dump())])
+
+    verdicts = judge_screenshots(screenshots, guidelines, model=FunctionModel(fn))
+
+    assert len(verdicts) == len(VISION_DIMENSIONS)
+    for v in verdicts:
+        assert v.guideline_ref == "2.3"
 
 
 def test_empty_screenshot_list_yields_no_verdicts_and_no_model_call():

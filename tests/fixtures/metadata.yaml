@@ -1,0 +1,21 @@
+app_id: "123456789"
+primary_locale: en-US
+locales:
+  en-US:
+    app_name: "Sunrise Tasks"
+    subtitle: "Plan your day with ease"
+    description: "Sunrise Tasks helps you plan your day with a clean, focused task list."
+    keywords: "tasks,todo,planner,productivity"
+    promotional_text: "Now with dark mode!"
+    whats_new: "Bug fixes and performance improvements."
+    support_url: "https://example.com/support"
+    marketing_url: "https://example.com"
+    privacy_url: "https://example.com/privacy"
+  de-DE:
+    app_name: "Sonnenaufgang Aufgaben"
+    description: "Sonnenaufgang Aufgaben hilft dir, deinen Tag mit einer klaren, fokussierten Aufgabenliste zu planen."
+    keywords: "aufgaben,todo,planer,produktivitaet"
+screenshots:
+  en-US:
+    - screenshots/en-US/1.png
+    - screenshots/en-US/2.png

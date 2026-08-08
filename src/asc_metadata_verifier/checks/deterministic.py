@@ -24,16 +24,17 @@ TEXT_FIELDS: tuple[str, ...] = (
 # The 3 URL fields checked for well-formedness.
 URL_FIELDS: tuple[str, ...] = ("support_url", "marketing_url", "privacy_url")
 
-# Placeholder patterns, verbatim from the task brief, case-insensitive.
+# Placeholder patterns, word-boundary anchored to avoid substring false
+# positives (e.g. "placeholders", "Maxxx", "expandable"), case-insensitive.
 _PLACEHOLDER_PATTERNS: list[re.Pattern[str]] = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
         r"\blorem\b",
         r"\bipsum\b",
-        r"TODO",
-        r"XXX",
-        r"FIXME",
-        r"placeholder",
+        r"\bTODO\b",
+        r"\bXXX\b",
+        r"\bFIXME\b",
+        r"\bplaceholder\b",
         r"\bTBD\b",
     )
 ]
@@ -45,7 +46,8 @@ def _check_over_limit(locale: str, field: str, value: str | None) -> Determinist
         return None
 
     limit = FIELD_LIMITS[field]
-    detail = f"exceeds {limit}-char limit by {overflow} (len {len(value or '')})"
+    # value is guaranteed non-None here: over_limit() already returns None for None values.
+    detail = f"exceeds {limit}-char limit by {overflow} (len {len(value)})"
     return DeterministicFinding(locale=locale, field=field, kind="over_limit", detail=detail)
 
 

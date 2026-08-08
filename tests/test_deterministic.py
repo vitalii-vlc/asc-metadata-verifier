@@ -11,7 +11,7 @@ def _flawed_metadata() -> AppMetadata:
         locales=[
             LocaleMetadata(
                 locale="en-US",
-                app_name="A" * 31,  # over_limit
+                app_name="x" * 31,  # over_limit
                 subtitle="Do things fast",
                 promotional_text="Limited time offer",
                 keywords="",  # missing_required (empty after strip)
@@ -172,3 +172,87 @@ class TestUrlFields:
     def test_non_http_scheme_is_malformed(self):
         findings = run_deterministic(self._meta_with_url("privacy_url", "ftp://example.com"))
         assert any(f.kind == "malformed_url" and f.field == "privacy_url" for f in findings)
+
+
+class TestPlaceholderAnchoringRegression:
+    """Regression tests for anchoring TODO/XXX/FIXME/placeholder with \\b.
+
+    Before this fix, these four patterns were unanchored and matched inside
+    longer words/substrings (e.g. "XXX" matched inside "xxxxxxxxxxx...").
+    """
+
+    def test_false_positives_are_gone(self):
+        """Substrings that used to trigger placeholder patterns must not anymore."""
+        meta = AppMetadata(
+            locales=[
+                LocaleMetadata(
+                    locale="en-US",
+                    app_name="Maxxx",
+                    subtitle="expandable options",
+                    promotional_text="All placeholders filled in for launch",
+                )
+            ],
+        )
+        findings = run_deterministic(meta)
+        assert not any(f.kind == "placeholder" for f in findings)
+
+    def test_real_matches_still_detected(self):
+        """Standalone tokens (space/punctuation-delimited) must still match."""
+        meta = AppMetadata(
+            locales=[
+                LocaleMetadata(
+                    locale="en-US",
+                    description="Draft: TODO, XXX, FIXME, placeholder text.",
+                )
+            ],
+        )
+        findings = run_deterministic(meta)
+        placeholder_findings = [
+            f for f in findings if f.kind == "placeholder" and f.field == "description"
+        ]
+        assert len(placeholder_findings) == 1
+        detail = placeholder_findings[0].detail
+        assert "TODO" in detail
+        assert "XXX" in detail
+        assert "FIXME" in detail
+        assert "placeholder" in detail
+
+
+class TestMultiLocale:
+    """run_deterministic must iterate every locale and tag findings correctly."""
+
+    def test_two_locales_each_with_distinct_flaw(self):
+        meta = AppMetadata(
+            app_id="123456789",
+            primary_locale="en-US",
+            locales=[
+                LocaleMetadata(
+                    locale="en-US",
+                    app_name="x" * 31,  # over_limit, only in en-US
+                    description="A perfectly fine description.",
+                    keywords="productivity",
+                    support_url="https://example.com/support",
+                ),
+                LocaleMetadata(
+                    locale="es-ES",
+                    app_name="Mi App",
+                    description="Una descripcion perfectamente valida.",
+                    keywords="productividad",
+                    support_url="notaurl",  # malformed_url, only in es-ES
+                ),
+            ],
+        )
+
+        findings = run_deterministic(meta)
+
+        en_findings = [f for f in findings if f.locale == "en-US"]
+        es_findings = [f for f in findings if f.locale == "es-ES"]
+
+        assert any(f.kind == "over_limit" and f.field == "app_name" for f in en_findings)
+        assert not any(f.kind == "over_limit" for f in es_findings)
+
+        assert any(f.kind == "malformed_url" and f.field == "support_url" for f in es_findings)
+        assert not any(f.kind == "malformed_url" for f in en_findings)
+
+        # every finding is tagged with one of the two locales, nothing else
+        assert {f.locale for f in findings} <= {"en-US", "es-ES"}

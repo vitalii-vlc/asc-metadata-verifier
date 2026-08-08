@@ -15,10 +15,16 @@ Install the library, then let `library-skills` install the bundled Claude skill:
 
 ```bash
 uv add asc-metadata-verifier
-uvx library-skills          # discovers + installs the bundled `app-store-review-gate` skill
+uvx library-skills --claude  # discovers + installs the bundled `app-store-review-gate` skill into ~/.claude/skills
 ```
 
-(Manual fallback: copy `app-store-review-gate/SKILL.md` into `~/.claude/skills/app-store-review-gate/`.)
+Plain `uvx library-skills` (no flag) targets the generic `.agents/skills` directory, which Claude Code doesn't read — Claude Code users need the `--claude` flag (or to select `.claude/skills` when prompted interactively).
+
+**Manual fallback** (no `library-skills` tool available): copy the **whole skill directory** — not just `SKILL.md` — into `~/.claude/skills/`:
+
+```bash
+cp -r site-packages/asc_metadata_verifier/.agents/skills/app-store-review-gate ~/.claude/skills/
+```
 
 ## Usage
 

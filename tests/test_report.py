@@ -80,10 +80,89 @@ class TestRenderMarkdown:
         markdown = render_markdown(report)
         assert v.locale in markdown
         assert v.dimension in markdown
+        assert v.field in markdown
         assert v.offending_quote in markdown
         assert v.guideline_ref in markdown
         assert v.rationale in markdown
         assert v.suggested_fix in markdown
+
+    def test_multi_group_locale_times_dimension_grouping(self):
+        """Regression guard: grouping must key on (locale, dimension) TOGETHER.
+
+        A grouping bug that keyed on locale-alone or dimension-alone would
+        pass the single-verdict test above undetected. Here: two distinct
+        (locale, dimension) pairs plus a THIRD pair shared by two verdicts
+        with different fields -> exactly 3 group headers, not 4 (the shared
+        pair collapses into one group), and the two verdicts sharing a
+        group are distinguishable via their `field`.
+        """
+        v_en_platform = RubricVerdict(
+            dimension="other_platform_mentions",
+            verdict="fail",
+            severity="high",
+            confidence=0.9,
+            rationale="Mentions Android.",
+            offending_quote="Also on Android",
+            locale="en-US",
+            field="description",
+        )
+        v_de_platform = RubricVerdict(
+            dimension="other_platform_mentions",
+            verdict="fail",
+            severity="high",
+            confidence=0.9,
+            rationale="Erwaehnt Android.",
+            offending_quote="Auch auf Android",
+            locale="de-DE",
+            field="description",
+        )
+        v_en_keywords_description = RubricVerdict(
+            dimension="keyword_stuffing",
+            verdict="warn",
+            severity="medium",
+            confidence=0.7,
+            rationale="Repeats keywords in the description.",
+            locale="en-US",
+            field="description",
+        )
+        v_en_keywords_field = RubricVerdict(
+            dimension="keyword_stuffing",
+            verdict="warn",
+            severity="medium",
+            confidence=0.7,
+            rationale="Repeats keywords in the keywords field.",
+            locale="en-US",
+            field="keywords",
+        )
+        verdicts = [
+            v_en_platform,
+            v_de_platform,
+            v_en_keywords_description,
+            v_en_keywords_field,
+        ]
+        report = GateReport(
+            status="BLOCK", verdicts=verdicts, deterministic_findings=[], guidelines_available=True
+        )
+
+        markdown = render_markdown(report)
+
+        # exactly 3 group headers: (en-US, other_platform_mentions),
+        # (de-DE, other_platform_mentions), (en-US, keyword_stuffing) --
+        # the two en-US/keyword_stuffing verdicts share ONE header.
+        assert markdown.count("### en-US / other_platform_mentions") == 1
+        assert markdown.count("### de-DE / other_platform_mentions") == 1
+        assert markdown.count("### en-US / keyword_stuffing") == 1
+        assert markdown.count("###") == 3
+
+        # each header names its own correct locale AND dimension (a
+        # locale-only or dimension-only grouping bug would merge these).
+        assert "### en-US / other_platform_mentions" in markdown
+        assert "### de-DE / other_platform_mentions" in markdown
+        assert "### en-US / keyword_stuffing" in markdown
+        # the two verdicts sharing (en-US, keyword_stuffing) are
+        # distinguishable from each other via their rendered `field`.
+        assert "**field:** description" in markdown
+        assert "**field:** keywords" in markdown
 
     def test_missing_guideline_ref_renders_placeholder(self):
         v = RubricVerdict(
@@ -150,6 +229,41 @@ class TestRenderMarkdown:
         assert isinstance(markdown, str)
         # no ANSI escape codes / rich markup leaking through
         assert "\x1b[" not in markdown
+
+    def test_empty_report_shows_fallback_copy(self):
+        """Locks in the exact fallback strings for an all-empty GateReport."""
+        report = GateReport(
+            status="PASS", verdicts=[], deterministic_findings=[], guidelines_available=True
+        )
+        markdown = render_markdown(report)
+        assert "No rubric verdicts." in markdown
+        assert "No deterministic findings." in markdown
+
+    def test_empty_string_fields_render_verbatim_not_as_not_available(self):
+        """A legitimate empty string is not the same as an absent (None) value.
+
+        offending_quote/guideline_ref/suggested_fix should only fall back to
+        the "n/a" placeholder when they are actually None -- a falsy-but-
+        present empty string must render as-is (verified here by asserting
+        the placeholder does NOT appear when every optional field is "").
+        """
+        v = RubricVerdict(
+            dimension="placeholder_text",
+            verdict="fail",
+            severity="high",
+            confidence=0.9,
+            rationale="rationale text",
+            offending_quote="",
+            guideline_ref="",
+            suggested_fix="",
+            locale="en-US",
+            field="description",
+        )
+        report = GateReport(
+            status="BLOCK", verdicts=[v], deterministic_findings=[], guidelines_available=True
+        )
+        markdown = render_markdown(report)
+        assert "n/a" not in markdown
 
 
 class TestExitCode:

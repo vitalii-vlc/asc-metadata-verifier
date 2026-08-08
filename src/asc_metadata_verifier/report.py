@@ -17,12 +17,19 @@ def render_json(report: GateReport) -> str:
     return report.model_dump_json(indent=2)
 
 
+def _or_not_available(value: str | None) -> str:
+    return _NOT_AVAILABLE if value is None else value
+
+
 def _verdict_section(verdict: RubricVerdict) -> list[str]:
-    lines = [f"- **verdict:** {verdict.verdict} (severity: {verdict.severity})"]
-    lines.append(f"  - **offending quote:** {verdict.offending_quote or _NOT_AVAILABLE}")
-    lines.append(f"  - **guideline:** {verdict.guideline_ref or _NOT_AVAILABLE}")
+    lines = [
+        f"- **field:** {verdict.field} — **verdict:** {verdict.verdict} "
+        f"(severity: {verdict.severity})"
+    ]
+    lines.append(f"  - **offending quote:** {_or_not_available(verdict.offending_quote)}")
+    lines.append(f"  - **guideline:** {_or_not_available(verdict.guideline_ref)}")
     lines.append(f"  - **rationale:** {verdict.rationale}")
-    lines.append(f"  - **suggested fix:** {verdict.suggested_fix or _NOT_AVAILABLE}")
+    lines.append(f"  - **suggested fix:** {_or_not_available(verdict.suggested_fix)}")
     return lines
 
 
@@ -67,8 +74,8 @@ def render_markdown(report: GateReport) -> str:
       1. Overall status heading, plus a note when guideline references were
          unavailable (offline mode).
       2. Rubric verdicts, grouped by locale x dimension; each non-pass
-         verdict includes its offending quote, guideline reference (or
-         "n/a"), rationale, and suggested fix.
+         verdict includes its field, offending quote, guideline reference
+         (or "n/a"), rationale, and suggested fix.
       3. Deterministic findings (locale, field, kind, detail).
     """
     lines: list[str] = [f"# ASC Metadata Verifier Report: {report.status}", ""]

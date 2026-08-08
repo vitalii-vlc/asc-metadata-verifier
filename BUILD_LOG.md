@@ -181,3 +181,223 @@ that `report.failures` is empty — because `Dataset.evaluate_sync` shunts a tas
 that RAISED (e.g. a failed real-model call) into a separate `failures` list,
 which would otherwise silently shrink the denominator and inflate rates in
 Task 15. A shortfall now raises `RuntimeError` instead of quietly under-counting.
+
+---
+
+## Build actuals (Task 15 — end of Phase 1)
+
+This section is written AFTER the Phase 1 implementation, as the honest counterpart
+to the pre-registration above. It records what actually happened, not what was
+planned — including the parts that didn't go cleanly.
+
+### Approach
+
+Phase 1 was scoped as **15 tasks** (`docs/superpowers/plans/2026-08-08-asc-metadata-verifier.md`),
+built **TDD** (RED before GREEN, per-task), **subagent-driven**: each task ran as an
+implementer sub-agent producing a report, then a separate reviewer sub-agent audited
+the diff against the task's spec before the task was marked complete — a genuine
+spec+quality **review gate**, not a rubber stamp (see the fix rounds below, and
+Task 8's reviewer literally fetching the live Apple guidelines page to check the
+extraction logic against real markup, and Task 14's reviewer inspecting the actual
+built wheel rather than trusting the packaging config). The pre-registered estimate
+was **7 working-days part-time**, signed off by Vitalii on 2026-08-08 (design spec,
+`docs/superpowers/specs/2026-08-08-asc-metadata-verifier-design.md:100`; AI-generated
+range was ~6–9, set at 7 by the senior engineer). This log does not fabricate a
+measured elapsed-time actual against that estimate — the SDD ledger
+(`.superpowers/sdd/2026-08-08-asc-metadata-verifier/progress.md`) records task-by-task
+outcomes, not wall-clock time, so no elapsed-days number is claimed here.
+
+### Fix rounds that actually occurred (evidence the review gate worked)
+
+Of 15 tasks, **6 required a fix round** after review before being marked complete;
+9 passed review clean on the first pass. Recording the fix rounds honestly — this is
+the review gate doing its job, not a defect in the process:
+
+- **T5 (deterministic checks):** review flagged that the placeholder patterns
+  (`TODO`, `XXX`, `FIXME`, `placeholder`) were unanchored, causing substring false
+  positives (e.g. "Maxxx", "placeholders", "expandable options"). Vitalii made an
+  explicit execution-time decision (via `AskUserQuestion`) to **anchor all four
+  patterns with `\b…\b`** word boundaries; the plan doc was revised and the fix
+  committed (`0d3e439`, `e9ce537`). This same anchoring is what Task 15's flawed
+  fixture depends on (see "Honest limitations" below for where it still isn't free
+  of edge cases — see the fixture-authoring note further down).
+- **T7 (YAML ingest):** review found malformed/non-dict YAML input (e.g. `locales`
+  as a list or string, screenshot values as bare strings) raised a raw Python
+  exception (`AttributeError`) instead of an `IngestError`. Fixed to raise
+  `IngestError` uniformly, with added `isinstance` guards and a `UnicodeDecodeError`
+  catch (`d35d1cd`).
+- **T8 (live guidelines source):** review **fetched the real Apple guidelines
+  page** and found two real problems: (1) `sections["2.3"]` came back empty
+  because the real markup splits the heading number from its title with an inline
+  tooltip `<span>`/`<img>` inside the `<strong>` tag; (2) `<script>`/`<style>` tag
+  *bodies* (not just the tags) were leaking ~12% raw JS/CSS text into the extracted
+  guideline text. Both fixed (bare-section-number line-merging heuristic; strip
+  script/style bodies before tag-stripping) and re-verified against a second live
+  fetch (`5b15c12`).
+- **T9 (judge agent + rubric):** review flagged that the default/env model
+  construction path (`build_judge()` with `model=None`, `ASC_JUDGE_MODEL` env var,
+  `defer_model_check=True`) had no test coverage. Added keyless-construction and
+  env-precedence tests, plus tightened the honesty guarantee so `guideline_ref` is
+  forced `None` whenever the grounding text actually used for a call is empty — not
+  only when `guidelines.available` is `False` (`b48f85e`).
+- **T11 (gate + report):** review found the locale×dimension markdown grouping
+  logic had no test actually exercising **more than one group** — added a real
+  multi-group test, plus fixed pass-verdicts not surfacing their `field` (`6bdcb5e`).
+- **T13 (golden dataset + meta-eval):** review (by an Opus reviewer who
+  hand-audited 23/44 case labels) found that 4 positive cases carry genuine
+  second-dimension signal (e.g. competitor brand names in a `keyword_stuffing` case
+  are *also* third-party trademarks), and single-label ground truth was scoring a
+  *correct* judge flag on that second dimension as a false positive — depressing
+  `third_party_trademark` precision to 0.571. Fixed by upgrading to **multi-label
+  ground truth** (`also_valid_dimensions`) for exactly those 4 cases, which restores
+  precision to 1.0 for a judge that correctly flags both dimensions, without
+  touching recall (`69678da`).
+
+The other 9 tasks (T1–T4, T6, T10, T12, T14, and T15 itself) passed review with no
+fix round, or (T15) required no pipeline fix at all — see below.
+
+### Controller design decisions to surface for Vitalii's review
+
+Two decisions were made during execution, where the plan was silent or ambiguous,
+and are being surfaced explicitly here rather than left buried in commit history:
+
+1. **Deterministic-finding → gate-level mapping.** The plan specified that
+   `evaluate()` takes `deterministic_findings` but did not pin the exact
+   block/warn logic for them. Task 11's controller decision (recorded live in the
+   SDD ledger) was: `over_limit` and `missing_required` are **BLOCK-worthy**
+   (they are objective, guaranteed App Store rejections — no judgment call
+   involved), while `placeholder` and `malformed_url` are **WARN-worthy**
+   (heuristic signals that can have false positives). This is what makes
+   `--dry-run` / no-`ANTHROPIC_API_KEY` mode still catch hard rejections even with
+   the judge fully skipped — worth Vitalii revisiting if the WARN/BLOCK split ever
+   needs different risk tolerance (e.g. treating `malformed_url` as BLOCK too).
+2. **Placeholder patterns anchored with `\b…\b`.** Per Vitalii's T5 execution-time
+   decision above — flagged here again because it is a live tradeoff: word-boundary
+   anchoring eliminates substring false positives (e.g. "placeholders"), but it
+   also means a placeholder token embedded without word boundaries (rare, but e.g.
+   a token concatenated with punctuation the regex engine doesn't treat as a
+   boundary) could in principle be missed. No such miss has been observed in
+   practice; noted for awareness, not as a known bug.
+
+### Task 15 itself: the e2e run, and the one thing it actually caught
+
+Building the flawed fixture (`tests/fixtures/fastlane_flawed/`) followed the same
+RED→GREEN discipline: `tests/test_e2e.py` was written first and confirmed to fail
+by collection error (`ERROR: file or directory not found: tests/test_e2e.py`)
+when the test file and fixture were temporarily moved aside, then the fixture was
+authored and the test passed clean on the **first real run against the actual
+pipeline** — **no pipeline code changes were needed** in `checks/deterministic.py`,
+`gate.py`, `report.py`, or `cli.py`. This is genuinely different from the fix
+rounds above (T5, T7, T8, T9, T11, T13), where review caught real code defects;
+here the pipeline had none left to find.
+
+The one real thing the e2e process did catch was in the **fixture itself**, not
+the pipeline: the first draft of `keywords.txt` reused the clean fixture's
+`"tasks,todo,planner,productivity"` keyword list, and the word "todo" — a
+legitimate, realistic keyword in a task-planner app's keyword list — matched the
+(correctly, per T5) anchored `\bTODO\b` placeholder pattern, producing a 5th,
+unplanned `placeholder` finding on the `keywords` field and muddying the intended
+"exactly 4 planted issues" story. Fixed by changing the keyword list to
+`"tasks,checklist,planner,productivity,organizer"` (no fix to production code).
+This is a small but real illustration of why "verify the fixture doesn't
+accidentally trip an anchored pattern" (the brief's own warning) matters in
+practice, not just in theory — anchored word-boundary matching is precise, but a
+real-sounding word can still legitimately be a placeholder token.
+
+### Real-model meta-eval status — HONEST
+
+**The real-model judge meta-eval has NOT been run in this build.** There is no
+`ANTHROPIC_API_KEY` in this dev environment, so both gated tests remain skipped:
+
+```
+tests/test_judge.py::test_real_model_smoke SKIPPED (requires ANTHROPIC_API_KEY)
+tests/test_meta_eval.py::test_real_model_meta_eval SKIPPED
+```
+
+The pre-registered accuracy **targets** (≥0.80 per-dimension recall, ≥0.80 overall
+accuracy — see the pre-registration section above) stand as targets. **No
+real-model accuracy numbers — per-dimension or overall — are recorded or
+fabricated anywhere in this log or the README.** Only the offline
+`FunctionModel`-stub harness-validation numbers (oracle / always_pass / always_fail)
+are real numbers, and they measure the aggregation *logic*, not judge quality.
+
+**To run the real-model meta-eval later:**
+
+```bash
+export ANTHROPIC_API_KEY=sk-...
+uv run pytest tests/test_judge.py::test_real_model_smoke -v      # single-call smoke test first
+uv run pytest tests/test_meta_eval.py::test_real_model_meta_eval -v  # full 44x8 grid, real model
+```
+
+That run exercises the **multi-label ground-truth** scoring (Fix round 1 above —
+`also_valid_dimensions` cells are excluded from TP/FP/FN and counted as
+`accepted_secondary_detections` instead) and the **denominator guard** added in
+that same fix round (`run()` on the real-model path asserts the scored-case count
+equals the golden-set line count and `report.failures` is empty, raising
+`RuntimeError` on a shortfall instead of silently under-counting and inflating
+rates) — append the actual per-dimension precision/recall/accuracy and any
+triggered failure-taxonomy entries under a new "Real-model actuals" heading when
+that run happens.
+
+### Honest limitations — where this tool could miss
+
+- **Judge quality is not yet empirically measured against a real model** — only
+  the offline `FunctionModel` stub harness has been exercised (see above). The
+  8-dimension rubric's real-world precision/recall is unknown until the gated
+  real-model meta-eval is run.
+- **Guideline section-extraction is heuristic**, not a real HTML parser: it reduces
+  tags to newlines and pattern-matches numbered headings. It was validated against
+  a **real fetch of the live Apple guidelines page** for §2.3 specifically (Task 8's
+  review round, confirmed twice), but Apple could restructure the page in a way
+  that breaks the heading regex or the bare-section-number merge heuristic again;
+  there is no test against the *entire* current page, only the specific markup
+  shapes that were found and fixed.
+- **The rubric is 8 MVP rejection-risk dimensions** (placeholder text, other-platform
+  mentions, misleading claims, price terms, keyword stuffing, beta/demo mentions,
+  unauthorized contact links, third-party trademark). ASO-quality and localization
+  rubrics (e.g. subtitle keyword optimization, translation quality) are not built
+  and are out of scope for Phase 1.
+- **Vision (screenshot) judging and the App Store Connect API adapter are Phase 2**,
+  not yet built. `--no-vision` is accepted by the CLI for shape stability but never
+  runs anything yet either way, and there is no `--asc-api` flag.
+
+### library-skills bundling — empirically verified, confirmed
+
+Unlike the judge-quality items above, this one is **confirmed**, not pending:
+Task 14 verified wheel inclusion of the bundled `app-store-review-gate` skill
+(via `unzip -l` on the actual built wheel plus a packaging test) with **zero**
+extra `pyproject.toml` config needed, and ran a **real** `uvx library-skills`
+install against a fresh consumer project, confirming the skill lands in both
+`.agents/skills` and `.claude/skills`. This can be stated as fact, not aspiration.
+
+### RED/GREEN evidence (Task 15)
+
+RED — before the fixture/test existed (reproduced by temporarily moving both aside):
+
+```
+$ uv run pytest tests/test_e2e.py -v
+ERROR: file or directory not found: tests/test_e2e.py
+collected 0 items
+```
+
+GREEN — after building the fixture (with one fixture-content fix, no pipeline
+code change; see above) and the e2e test:
+
+```
+$ uv run pytest tests/test_e2e.py -v
+tests/test_e2e.py::TestFlawedAppMarkdown::test_blocks_and_names_all_four_planted_issues PASSED
+tests/test_e2e.py::TestFlawedAppJson::test_json_status_block_and_planted_items_present PASSED
+2 passed in 0.83s
+```
+
+Full suite + lint:
+
+```
+$ uv run pytest
+149 passed, 2 skipped   ->   151 passed, 2 skipped   (2 new e2e tests added, no regressions)
+
+$ uv run ruff check .
+All checks passed!
+```
+
+--- END PHASE 1 ---

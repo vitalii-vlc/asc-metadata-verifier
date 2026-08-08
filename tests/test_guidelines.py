@@ -24,6 +24,28 @@ features. Don't include hidden, dormant, or undocumented features.</p>
 """
 
 
+# Reproduces the REAL developer.apple.com markup: the section number and
+# title are split by an inline tooltip <span>/<img>, so a naive "strip all
+# tags -> split lines" pass drops "2.3" onto its own line, separate from
+# "Accurate Metadata" -- which never matches the "<number> <title>" heading
+# regex. See fix-round-1 notes.
+FIXTURE_HTML_WITH_TOOLTIP_HEADING = """
+<html>
+<body>
+<script>var x = document.querySelector('a'); console.log(x);</script>
+<style>.tooltip { display: none; }</style>
+<h2>2.1 App Completeness</h2>
+<p>Your app should be fully functional at the time of submission.</p>
+<strong>2.3<span class="custom-tooltip-icon"><img src="x.png" alt=""></span>
+ Accurate Metadata</strong>
+<p>Your app's metadata should accurately reflect the app's core functionality.</p>
+<h2>3.1 In-App Purchase</h2>
+<p>Some unrelated section about payments.</p>
+</body>
+</html>
+"""
+
+
 def _mock_client(status_code: int = 200, text: str = FIXTURE_HTML) -> Mock:
     response = Mock()
     response.status_code = status_code
@@ -136,7 +158,7 @@ class TestOverridePath:
         monkeypatch.setattr(source, "CACHE_DIR", tmp_path / "asc_cache")
         missing = tmp_path / "does_not_exist.html"
 
-        with pytest.raises((FileNotFoundError, ValueError)):
+        with pytest.raises(FileNotFoundError):
             get_guidelines("sess4", override_path=missing)
 
     def test_override_path_does_not_write_session_cache(self, tmp_path, monkeypatch):
@@ -149,6 +171,38 @@ class TestOverridePath:
 
         cache_file = cache_dir / "sess5.guidelines.json"
         assert not cache_file.exists()
+
+
+class TestRealMarkupHeuristics:
+    """Regression tests for shapes found on the REAL developer.apple.com page."""
+
+    def test_tooltip_split_heading_still_extracts_section_2_3(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(source, "CACHE_DIR", tmp_path / "asc_cache")
+        client = _mock_client(text=FIXTURE_HTML_WITH_TOOLTIP_HEADING)
+
+        result = get_guidelines("sess-tooltip", client=client)
+
+        assert result.available is True
+        assert "2.3" in result.sections
+        assert "accurately reflect the app's core functionality" in result.sections["2.3"]
+
+    def test_script_and_style_bodies_are_stripped_from_text(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(source, "CACHE_DIR", tmp_path / "asc_cache")
+        client = _mock_client(text=FIXTURE_HTML_WITH_TOOLTIP_HEADING)
+
+        result = get_guidelines("sess-script-strip", client=client)
+
+        assert "querySelector" not in result.text
+        assert "console.log" not in result.text
+        assert "display: none" not in result.text
+
+
+class TestSessionIdValidation:
+    def test_path_traversal_session_id_raises_value_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(source, "CACHE_DIR", tmp_path / "asc_cache")
+
+        with pytest.raises(ValueError):
+            get_guidelines("../evil", client=_mock_client())
 
 
 class TestDefaultClient:

@@ -32,6 +32,16 @@ CACHE_DIR = Path(tempfile.gettempdir()) / "asc_cache"
 # Screenshots" once HTML has been reduced to one heading/paragraph per line.
 _SECTION_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)+)\s+(.+)$")
 
+# A line that is *only* a section number, e.g. "2.3" with nothing else on the
+# line -- happens when the real markup splits the number from the title via
+# inline markup (a tooltip <span>/<img> between them inside <strong>2.3<span
+# class="custom-tooltip-icon"><img .../></span> Accurate Metadata</strong>).
+_BARE_SECTION_NUMBER_RE = re.compile(r"^\d+(?:\.\d+)+$")
+
+# session_id is interpolated directly into a cache filename; restrict it to
+# a safe charset so it can never traverse out of CACHE_DIR.
+_SESSION_ID_RE = re.compile(r"^[\w-]+$")
+
 
 class Guidelines(BaseModel):
     """Result of a guidelines lookup: live fetch, session cache, or override."""
@@ -59,7 +69,14 @@ def get_guidelines(
          `httpx.Client` if none was injected), cache the result, and return
          it. On any fetch failure, return `available=False` with empty
          text/sections rather than raising or fabricating content.
+
+    `session_id` is validated first (it is interpolated into a cache
+    filename) -- an id containing anything outside `[\\w-]` raises
+    `ValueError` rather than being used to build a path.
     """
+    if not _SESSION_ID_RE.match(session_id):
+        raise ValueError(f"invalid session_id: {session_id!r}")
+
     if override_path is not None:
         return _load_override(override_path)
 
@@ -144,10 +161,40 @@ def _write_cache(session_id: str, guidelines: Guidelines) -> None:
 
 
 def _html_to_lines(html: str) -> list[str]:
-    """Reduce HTML to one trimmed, unescaped, non-empty line per element."""
-    with_breaks = re.sub(r"<[^>]+>", "\n", html)
+    """Reduce HTML to one trimmed, unescaped, non-empty line per element.
+
+    Script/style element *bodies* are dropped first (not just their tag
+    delimiters), so embedded JS/CSS text never leaks into the extracted
+    text or sections. Afterwards, a line that is a bare section number
+    (e.g. "2.3" split from its title by an inline tooltip <span>/<img>) is
+    rejoined with the next non-empty line so the heading regex still
+    matches it.
+    """
+    without_scripts = re.sub(
+        r"<script\b[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE
+    )
+    without_style = re.sub(
+        r"<style\b[^>]*>.*?</style>", " ", without_scripts, flags=re.DOTALL | re.IGNORECASE
+    )
+    with_breaks = re.sub(r"<[^>]+>", "\n", without_style)
     unescaped = unescape(with_breaks)
-    return [line.strip() for line in unescaped.splitlines() if line.strip()]
+    raw_lines = [line.strip() for line in unescaped.splitlines() if line.strip()]
+    return _merge_bare_section_numbers(raw_lines)
+
+
+def _merge_bare_section_numbers(lines: list[str]) -> list[str]:
+    """Rejoin a bare "2.3"-style line with the next line as its title."""
+    merged: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if _BARE_SECTION_NUMBER_RE.match(line) and index + 1 < len(lines):
+            merged.append(f"{line} {lines[index + 1]}")
+            index += 2
+        else:
+            merged.append(line)
+            index += 1
+    return merged
 
 
 def _extract_sections(lines: list[str]) -> dict[str, str]:

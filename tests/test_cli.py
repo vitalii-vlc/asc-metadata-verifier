@@ -122,6 +122,72 @@ class TestJudgePath:
         assert "LLM checks skipped" not in result.output
 
 
+class TestVisionWiring:
+    """Task 17: the vision judge runs unless --no-vision, gated on key/model."""
+
+    def _patch_common(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-test-key")
+        monkeypatch.setattr(
+            cli,
+            "get_guidelines",
+            lambda **_kwargs: Guidelines(
+                available=True, text="2.3", sections={"2.3": "2.3"}, source="test"
+            ),
+        )
+        monkeypatch.setattr(cli, "judge_field", lambda *_a, **_k: [])
+
+    def test_vision_judge_called_when_screenshots_present_and_not_no_vision(self, monkeypatch):
+        self._patch_common(monkeypatch)
+        calls = []
+
+        def spy(screenshots, guidelines, model=None):
+            calls.append((screenshots, guidelines, model))
+            return []
+
+        monkeypatch.setattr(cli, "judge_screenshots", spy)
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT])
+
+        assert result.exit_code in {0, 1}, result.output
+        assert len(calls) == 1
+        screenshots, _guidelines, _model = calls[0]
+        assert len(screenshots) > 0
+
+    def test_vision_judge_not_called_with_no_vision_flag(self, monkeypatch):
+        self._patch_common(monkeypatch)
+
+        def spy_should_not_run(*_a, **_k):
+            raise AssertionError("judge_screenshots must not run with --no-vision")
+
+        monkeypatch.setattr(cli, "judge_screenshots", spy_should_not_run)
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision"])
+
+        assert result.exit_code in {0, 1}, result.output
+
+    def test_vision_judge_verdicts_are_merged_into_the_gate(self, monkeypatch):
+        self._patch_common(monkeypatch)
+        monkeypatch.setattr(cli, "judge_screenshots", lambda *_a, **_k: [_fail_verdict()])
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT])
+
+        assert result.exit_code == 1, result.output
+        assert "BLOCK" in result.output
+
+    def test_vision_judge_not_called_without_key_or_model(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        def spy_should_not_run(*_a, **_k):
+            raise AssertionError("judge_screenshots must not run without a key or model")
+
+        monkeypatch.setattr(cli, "judge_screenshots", spy_should_not_run)
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT])
+
+        assert result.exit_code == 0, result.output
+
+
 class TestRunVerifyHelper:
     """Direct tests of the plain-function pipeline, independent of typer."""
 

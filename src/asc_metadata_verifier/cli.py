@@ -1,8 +1,9 @@
 """`asc-verify`: the CLI that orchestrates the full verification pipeline.
 
 Pipeline: pick an ingest adapter -> `load()` -> deterministic checks ->
-guidelines fetch -> LLM judge (skipped when no key/model is available) ->
-gate -> render -> exit code.
+guidelines fetch -> text judge + vision judge (both skipped when no
+key/model is available; vision additionally skipped by `--no-vision` or when
+there are no screenshots) -> gate -> render -> exit code.
 
 The pipeline logic lives in `run_verify`, a plain function with no typer/click
 dependency, so it can be called and tested directly. The `verify` typer
@@ -10,8 +11,9 @@ command is a thin wrapper: arg parsing, printing, and exit-code translation.
 
 Every collaborator is imported at module level (not inside functions) so
 tests -- and Task 15's flawed-app e2e -- can monkeypatch them directly on
-this module (e.g. `monkeypatch.setattr(cli, "judge_field", fake)`), which is
-also how tests avoid a real network call to the live guidelines source.
+this module (e.g. `monkeypatch.setattr(cli, "judge_field", fake)` or
+`monkeypatch.setattr(cli, "judge_screenshots", fake)`), which is also how
+tests avoid a real network call to the live guidelines source.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from asc_metadata_verifier.ingest.fastlane import FastlaneAdapter
 from asc_metadata_verifier.ingest.yaml_source import YamlAdapter
 from asc_metadata_verifier.judge.agent import judge_field
 from asc_metadata_verifier.judge.rubric import DIMENSIONS
+from asc_metadata_verifier.judge.vision import judge_screenshots
 from asc_metadata_verifier.observability import configure_logfire, span
 from asc_metadata_verifier.report import exit_code, render_json, render_markdown
 
@@ -83,18 +86,16 @@ def run_verify(
     produce a working adapter, so it is rejected rather than silently falling
     back to fastlane/YAML.
 
-    `no_vision` is accepted for CLI-shape stability only: vision checks are
-    Phase 2 (Task 17) and are never run in this phase regardless of its value.
-
-    In `dry_run` mode, guidelines are never fetched and the judge never runs
-    -- deterministic checks + gate only, so the command works fully offline
-    with no network and no API key. Outside `dry_run`, the judge itself only
-    runs when `judge_model` is injected or `ANTHROPIC_API_KEY` is set in the
-    environment; otherwise it is skipped and `llm_skipped` is True, but the
-    deterministic report + gate + exit code are still produced.
+    In `dry_run` mode, guidelines are never fetched and neither judge runs --
+    deterministic checks + gate only, so the command works fully offline with
+    no network and no API key. Outside `dry_run`, the text judge runs when
+    `judge_model` is injected or `ANTHROPIC_API_KEY` is set in the
+    environment; otherwise both judges are skipped and `llm_skipped` is True,
+    but the deterministic report + gate + exit code are still produced. The
+    vision judge (Task 17) additionally requires `not no_vision` and at least
+    one screenshot in the ingested metadata; when it runs, its verdicts are
+    appended alongside the text judge's in the same list passed to `evaluate`.
     """
-    del no_vision  # Phase 2 (Task 17); accepted now only to keep the CLI shape stable.
-
     configure_logfire()
     with span("verify"):
         asc_api_fields = {
@@ -142,10 +143,18 @@ def run_verify(
                     session_id=uuid.uuid4().hex, override_path=guidelines_path
                 )
 
-            if judge_model is not None or os.environ.get("ANTHROPIC_API_KEY"):
+            has_key_or_model = judge_model is not None or os.environ.get("ANTHROPIC_API_KEY")
+
+            if has_key_or_model:
                 with span("judge"):
                     verdicts = judge_field(meta, guidelines, DIMENSIONS, model=judge_model)
                 llm_skipped = False
+
+            if not no_vision and has_key_or_model and meta.screenshots:
+                with span("vision"):
+                    verdicts = verdicts + judge_screenshots(
+                        meta.screenshots, guidelines, model=judge_model
+                    )
 
         with span("gate"):
             report = evaluate(
@@ -186,7 +195,9 @@ def verify(
     no_vision: bool = typer.Option(
         False,
         "--no-vision",
-        help="Reserved for Phase 2 (Task 17): vision checks never run yet either way.",
+        help="Skip the vision screenshot judge (Task 17). The vision judge runs "
+        "only when this is unset, an API key/model is available, and there are "
+        "screenshots to judge.",
     ),
     output_format: OutputFormat = typer.Option(
         OutputFormat.md, "--format", help="Report output format."

@@ -31,6 +31,12 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# typer's idiomatic API requires typer.Argument()/typer.Option() calls as
+# parameter defaults (it inspects the default instance for CLI metadata);
+# bugbear's "no function calls in defaults" check doesn't fit that pattern.
+"src/asc_metadata_verifier/cli.py" = ["B008"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

@@ -28,6 +28,9 @@ logfire_credentials.json
 *.guidelines.cache
 *.guidelines.json
 
+# SDD scratch (ledger, briefs, review packages — git-ignored working space)
+.superpowers/
+
 # OS / editor
 .DS_Store
 .idea/

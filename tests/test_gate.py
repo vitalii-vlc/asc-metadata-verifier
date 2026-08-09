@@ -115,3 +115,17 @@ class TestReportContents:
         report = evaluate(verdicts, findings)
         assert report.verdicts == verdicts
         assert report.deterministic_findings == findings
+
+
+def test_evaluate_passes_panels_through_without_changing_status():
+    from asc_metadata_verifier.gate import evaluate
+    from asc_metadata_verifier.models import JudgeVote, PanelVerdict, RubricVerdict
+
+    rv = RubricVerdict(dimension="placeholder_text", verdict="warn", severity="medium",
+                       confidence=0.7, rationale="r", locale="en-US", field="description")
+    panel = PanelVerdict(locale="en-US", dimension="placeholder_text", field="description",
+                         votes=[JudgeVote(judge="a", status="voted", verdict=rv)],
+                         consensus=rv, policy="majority_severe", agreement=1.0)
+    report = evaluate([rv], [], panels=[panel])
+    assert report.status == "WARN" and len(report.panels) == 1
+    assert evaluate([rv], []).panels == []      # default stays empty

@@ -491,3 +491,189 @@ judge has been exercised against the real service/model they target. No new
 accuracy or reliability numbers are claimed here; none were measured.
 
 --- END PHASE 2 ---
+
+## Multi-LLM Jury (sub-project A)
+
+### Task 4 — JudgeClient (async text+vision, error-isolated, honesty-preserving)
+
+`src/asc_metadata_verifier/judge/client.py` adds `JudgeClient`: one
+configured model wrapped as an async judge that votes on a text unit
+(`run_text`) and, if it supports vision, a screenshot unit (`run_vision`).
+Two constructors: `from_model(name, model, *, supports_vision=False)` for
+offline/injected models (used by all of `tests/test_client.py`), and
+`from_spec(spec)` for a resolved `JudgeSpec` (Task 5, not yet built —
+referenced only as a `TYPE_CHECKING` forward ref here, so this module
+imports cleanly before Task 5 lands).
+
+**Step 0 (provider API verification, done before writing `_model_ref`):**
+ran
+`uv run python -c "import importlib; m=importlib.import_module('pydantic_ai.models.openai'); print([n for n in dir(m) if 'Model' in n])"`
+against the installed `pydantic-ai` (2.27.x). It printed
+`OpenAIChatModel`, `OpenAIResponsesModel`, `OpenAIModelProfile`, ... —
+**there is no `OpenAIModel` class in this version**; `OpenAIChatModel` is
+the one that maps to the brief's "OpenAIModel or OpenAIChatModel"
+instruction. `_model_ref` was written against `OpenAIChatModel(spec.model,
+provider=OpenAIProvider(base_url=..., api_key=...))` accordingly. The
+import did not raise `ModuleNotFoundError: openai` — the `openai` package
+(2.53.0) was already resolvable in this environment, so per the brief's
+conditional instruction no `openai` dependency was added to
+`pyproject.toml`. **Correction (fix round 1):** an earlier version of this
+note called that a "latent risk" from a fragile transitive pull; that
+overstated it. `importlib.metadata.requires("pydantic-ai")` shows
+`pydantic-ai` (2.27.0) itself depends on
+`pydantic-ai-slim[anthropic,cli,evals,google,logfire,mcp,openai,retries,web]==2.27.0`
+— i.e. `openai` arrives via **this project's own direct `pydantic-ai>=2.27.0`
+dependency and its pinned, bundled `openai` extra**, not an incidental
+third-party pull that could disappear underneath us. It is a stable,
+intentional part of what `pydantic-ai` ships. Declaring `openai>=1.0`
+explicitly in `pyproject.toml` is still optional good practice (makes the
+dependency self-documenting, survives a hypothetical future `pydantic-ai`
+release that drops the bundled extra) — deferred to Task 5, when
+`from_spec`'s OpenAI-compatible path first gets exercised — but it is not
+a reliability risk today.
+
+Honesty stamping matches v1 exactly (verified against
+`judge/agent.py::judge_field` and `judge/vision.py::judge_screenshots`
+before writing `_run`): text stamps only `locale`+`dimension` (the model
+reports `field` itself); vision additionally stamps `field="screenshot"`;
+both force `guideline_ref=None` whenever the grounding actually used for
+that call is falsy. A non-vision client's `run_vision` returns
+`JudgeVote(status="not_applicable")` before building any prompt or
+touching the agent — `tests/test_client.py`'s
+`test_non_vision_client_run_vision_is_not_applicable_without_a_call`
+asserts the injected model function was never invoked. Any exception
+raised by `agent.run(...)` is caught in the single shared `_run` helper
+and converted to `JudgeVote(status="error", error=str(exc)[:300])` — never
+re-raised, so one judge's failure can't take down a panel run (Task 6+).
+
+`tests/test_client.py` is entirely offline, driven by the same
+`FunctionModel` pattern as `tests/test_judge.py`, using `asyncio.run(...)`
+to exercise the async methods directly (no `pytest-asyncio` dependency
+added). RED confirmed first (`ModuleNotFoundError` for the not-yet-created
+module), then GREEN after implementation. Full suite: 206 passed, 3
+skipped (same 3 pre-existing real-model `skipif` gates as before this
+task — none of this task's tests are network-gated). `ruff check .` clean
+repo-wide.
+
+### Tasks 1–9 — panel, consensus, config/CLI wiring, jury meta-eval: design decisions, fix rounds, honest open items
+
+Nine tasks (`docs/superpowers/plans/2026-08-09-multi-llm-jury.md`), built the
+same subagent-driven way as Phase 1/2: an implementer sub-agent per task, then
+a separate reviewer sub-agent against the task's spec before it was marked
+complete (`.superpowers/sdd/2026-08-09-multi-llm-jury/progress.md` is the
+ledger). This entry records the sub-project as a whole; Task 4's own detailed
+entry above stands alongside it for the one task that wrote its own section.
+
+#### Design decisions
+
+- **Default-path-unchanged, not "one code path."** The design spec described
+  the eventual shape as a 1-judge Claude panel being the only code path. The
+  plan's self-review flagged this refinement explicitly and the implementation
+  follows the refinement, not the original framing: `cli.py::run_verify` keeps
+  the v1 single-judge branch **byte-identical and untouched**, and only takes
+  the jury branch (`_build_judge_set` + `build_panel` + `panel.run_panel`) when
+  `--judges` and/or `--judge` is actually given (`jury_requested`). This is
+  strictly safer — every pre-existing v1 test stays green with no risk of the
+  panel abstraction subtly changing v1 behavior, and there is no `asyncio.run`
+  nested inside pydantic-evals' sync evaluator. Equivalence between a 1-judge
+  panel and the v1 path is proven separately by
+  `tests/test_panel.py::test_single_real_client_panel_matches_v1_judge_field`
+  rather than by sharing one code path.
+- **pydantic-ai OpenAI class: `OpenAIChatModel`, not `OpenAIModel`.** Verified
+  before writing any code (Task 4 Step 0) by introspecting the installed
+  `pydantic-ai` (2.27.x): `dir(pydantic_ai.models.openai)` has
+  `OpenAIChatModel`/`OpenAIResponsesModel`, no `OpenAIModel`. `judge/client.py`'s
+  `_model_ref` builds `OpenAIChatModel(spec.model, provider=OpenAIProvider(base_url=...,
+  api_key=...))` accordingly — this is also what makes any `provider: openai`
+  entry with a `base_url` (Ollama/vLLM/LM Studio) work, since `OpenAIProvider`
+  just points the OpenAI-compatible client at a different endpoint. `openai>=1.0`
+  was declared explicitly in `pyproject.toml` during Task 5 (previously arriving
+  only transitively via `pydantic-ai`'s bundled extra).
+- **Empty-tally → flagged pass, never a fabricated verdict.** `judge/consensus.py`'s
+  four policies all route through `_voters()`, which counts only `status ==
+  "voted"` votes. If a unit has zero voters (every judge abstained/errored/was
+  not_applicable), `_empty()` returns `verdict="pass"` at `confidence=0.0` with a
+  rationale that says no judge voted, and `agreement=None` — a deliberately
+  *flagged* pass (visibly low-confidence, explicitly explained), never a silent
+  or invented verdict of any other kind.
+- **Unavailable judge → omitted at build, not at call time.** `judge/config.py`'s
+  `_resolve_availability` marks a `JudgeSpec.available=False` when it has no
+  resolvable API key and no `base_url`; `judge/panel.py::build_panel` then
+  filters to `[s for s in specs if s.available]` before constructing any
+  `JudgeClient`, so an unavailable judge never gets an agent built for it at
+  all. If that filter empties the client list, `build_panel` returns `None` and
+  `cli.py::run_verify` degrades to the same deterministic-only,
+  `llm_skipped=True` outcome as the v1 no-key path — not a jury of zero judges,
+  not a crash.
+
+#### Fix rounds (evidence the review gate worked)
+
+Of 9 tasks, **5 required a fix round** before being marked complete (T2, T4,
+T5, T8, T9); **4 passed review clean on the first pass** (T1, T3, T6, T7).
+
+- **T2 (consensus policies):** fix round fixed a `ruff` E501 line-length
+  violation; no logic defect found.
+- **T4 (JudgeClient):** fix round tightened error isolation, added a
+  field-parity test, and corrected this log's own earlier overstatement that
+  the `openai` dependency was a "latent risk" (it's `pydantic-ai`'s own pinned,
+  bundled extra — see above).
+- **T5 (judges.yaml loader + `--judge` mini-syntax):** fix round removed a raw
+  secret echo from a `JudgeConfigError` message and added a missing-file
+  path that previously surfaced an unguarded `OSError` instead of
+  `JudgeConfigError`.
+- **T8 (CLI wiring):** fix round made the bad-`--consensus` test offline-safe
+  (it needed the guidelines fetch stubbed to avoid a real network call).
+- **T9 (jury meta-eval):** the implementer caught **two provably-wrong test
+  assertions baked into the plan itself** before writing any code against them
+  — a `fleiss_kappa` chance-agreement input that doesn't actually evaluate to
+  0.0, and a content-independent fake judge that would have wrongly asserted
+  `1.0` accuracy for a fake that is truthfully only `0.5`-correct under the
+  unchanged `meta_eval` scoring rule. The controller resolved both by
+  correcting the plan's test snippets (not by weakening the assertions), then a
+  fix round added `_require_full_denominator` to guard the real-model path's
+  per-judge accuracy against a silent case-count shrink (mirrors Fix round 1's
+  denominator guard in the Task 13 section above).
+
+#### Honest open items — pre-registered before any real-model run
+
+**Pre-registered hypothesis** (verbatim from `evals/jury_eval.py`'s module
+docstring, written before any live-model jury run): *an ensemble (jury) of
+independent LLM judges achieves HIGHER golden-set per-case accuracy than the
+single best individual judge.* A null (zero) or NEGATIVE lift is explicitly
+called out as a valid, fully expected-possible outcome that must be reported
+unchanged — never massaged, clamped, or hidden; there is no code path that
+floors `lift` at zero.
+
+**Not yet run against live models — no numbers fabricated:**
+
+- **Real per-judge accuracy** over the 44-case golden set, per configured
+  judge (`evals/jury_eval.py::run(specs=...)` → `meta_eval.run` per judge).
+- **Inter-judge agreement** — Fleiss' κ per rubric dimension over real judges'
+  flagged/not-flagged decisions (`fleiss_kappa`, `_inter_judge_kappa`).
+- **Jury-vs-single-judge lift** per consensus policy (`jury_accuracy[policy] -
+  best_single_accuracy`).
+
+All three require API keys for at least two configured judges (e.g.
+`ANTHROPIC_API_KEY` + `OPENAI_API_KEY`, or a self-hosted `base_url` judge) that
+are not present in this dev environment. What **has** been validated is the
+*aggregation logic* offline, against synthetic/fake judge clients:
+`collect_grid`, all four consensus policies, `fleiss_kappa`'s arithmetic, and
+the denominator guard are exercised by `tests/test_jury_eval.py` and pass —
+this proves the scoring machinery is correct, not that a real ensemble beats a
+real single judge. `uv run pytest tests/test_jury_eval.py -v` reproduces the
+offline evidence; there is no gated real-model test for this module yet
+because there is no key in this environment to gate on — running it for real
+is future work, to be appended under a "Real-model actuals" heading (same
+pattern as the Task 13/15 meta-eval sections above) if and when it happens.
+
+### Task 10 — Documentation (this entry + README)
+
+README gained a "Multi-LLM jury (optional)" section: what the jury is, the
+`judges.yaml` schema (env-var-reference secrets only, `judges.example.yaml`
+reproduced verbatim), the four `--consensus` policies, `--judge`/
+`--max-concurrency`, the self-hosted (`base_url`) note, and the same honest
+status line as above — no accuracy/κ/lift numbers, because none have been
+measured against real models. Full suite: `uv run pytest -q` → **238 passed, 3
+skipped** (the 3 skips are the pre-existing `ANTHROPIC_API_KEY`-gated
+real-model tests, unrelated to the jury docs change). `uv run ruff check .` →
+**All checks passed!**

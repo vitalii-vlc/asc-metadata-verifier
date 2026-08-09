@@ -16,6 +16,36 @@ class RubricVerdict(BaseModel):
     field: str
 
 
+JudgeStatus = Literal["voted", "abstained", "error", "not_applicable"]
+
+
+class JudgeVote(BaseModel):
+    """One judge's outcome for one unit. `verdict` is set iff status == 'voted';
+    `error` iff status == 'error'. abstained/error/not_applicable are excluded
+    from the consensus tally but retained for the honesty record."""
+
+    judge: str
+    status: JudgeStatus
+    verdict: RubricVerdict | None = None
+    error: str | None = None
+    latency_ms: float | None = None
+
+
+class PanelVerdict(BaseModel):
+    """Every judge's vote on one (locale, dimension) [text] or (screenshot,
+    dimension) [vision] unit, plus the aggregated consensus the gate consumes.
+    `field` is descriptive (copied from the consensus), not a grouping key —
+    units are keyed by (locale, dimension)."""
+
+    locale: str
+    dimension: str
+    field: str
+    votes: list[JudgeVote]
+    consensus: RubricVerdict
+    policy: str
+    agreement: float | None = None
+
+
 class LocaleMetadata(BaseModel):
     locale: str
     app_name: str | None = None
@@ -54,3 +84,4 @@ class GateReport(BaseModel):
     verdicts: list[RubricVerdict] = Field(default_factory=list)
     deterministic_findings: list[DeterministicFinding] = Field(default_factory=list)
     guidelines_available: bool
+    panels: list[PanelVerdict] = Field(default_factory=list)

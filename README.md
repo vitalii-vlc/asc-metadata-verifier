@@ -115,6 +115,71 @@ _Note: guideline references unavailable (offline)._
 
 Exit code `1` (BLOCK). With a real `ANTHROPIC_API_KEY`, network access, and no `--guidelines` override, the judge calls the real model against the live guidelines instead — the verdict/rationale wording will differ from this stub, and `guideline` is populated with an actual cited section rather than `n/a`.
 
+## Multi-LLM jury (optional)
+
+By default `asc-verify` judges with a single Claude model — that's everything documented above, and it is unchanged. Pass `--judges` and/or `--judge` to instead judge every rubric dimension with a **panel of independent LLM judges** (any mix of Anthropic and OpenAI-compatible models) and combine their votes into one consensus verdict per (locale, dimension) unit:
+
+```bash
+asc-verify ./fastlane --judges judges.yaml                                      # jury from a config file
+asc-verify ./fastlane --judge anthropic:claude-sonnet-5 --judge openai:gpt-4o   # jury from inline specs, no file
+asc-verify ./fastlane --judges judges.yaml --consensus unanimous --max-concurrency 4
+```
+
+**`judges.yaml` schema.** Secrets are referenced by **environment variable name only** — a config file never contains a raw API key. `judges.example.yaml` (repo root):
+
+```yaml
+# Example jury configuration for `asc-verify --judges judges.yaml`.
+# Secrets are referenced by ENV VAR NAME only — never put a raw key here.
+# Default consensus when omitted: majority_severe. Override per run with --consensus.
+consensus: majority_severe
+judges:
+  - name: claude
+    provider: anthropic
+    model: claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+    vision: true
+  - name: gpt4o
+    provider: openai            # provider "openai" = OpenAI OR any OpenAI-compatible endpoint
+    model: gpt-4o
+    api_key_env: OPENAI_API_KEY
+    vision: true
+  - name: local-llama           # self-hosted via an OpenAI-compatible server (Ollama/vLLM/LM Studio)
+    provider: openai
+    model: llama3.1:70b
+    base_url: http://localhost:11434/v1
+    vision: false
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | Judge identifier — used for `--judge` merge-by-name and in reports. |
+| `provider` | `anthropic` or `openai`. `openai` also covers any OpenAI-compatible endpoint (see self-hosted note below). |
+| `model` | Model name/id passed to the provider. |
+| `api_key_env` | Name of the environment variable holding the API key (defaults to `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` per provider if omitted). Never a literal key. |
+| `base_url` | Optional — overrides the provider's default endpoint, for self-hosted models. |
+| `vision` | Whether this judge also votes on screenshots. |
+
+A judge with no resolvable API key and no `base_url` is **unavailable** and is silently omitted when the panel is built; if every configured judge is unavailable, the run degrades to the same deterministic-only path as running with no `--judges` and no key set at all.
+
+**`--judge`** adds or overrides one judge inline, no file needed: `[name=]provider:model[@base_url]`, repeatable, merged with `--judges` by name (a CLI `--judge` of the same name overrides a file entry; unmatched CLI specs are appended).
+
+**`--max-concurrency`** (default `8`) caps how many judge calls are in flight at once across the whole panel run.
+
+**Consensus policies** (`--consensus`, applied per unit over that unit's non-abstaining votes):
+
+| Policy | Rule |
+|---|---|
+| `majority_severe` (default) | The verdict with the most votes wins; ties are broken toward the more severe verdict. |
+| `most_severe` | The single most severe vote among all judges wins, regardless of how many judges agree. |
+| `unanimous` | The least severe vote among all judges wins — a verdict escalates to `warn`/`fail` only when every voting judge agrees at least that severe; a single dissenting `pass` pulls the result back to `pass`. |
+| `confidence_weighted` | Each judge's confidence score is summed per verdict; the verdict with the highest total confidence wins (ties broken toward the more severe). |
+
+**Self-hosted judges.** `provider: openai` means "any OpenAI-compatible chat-completions endpoint," not only OpenAI's hosted API — point `base_url` at a local Ollama, vLLM, or LM Studio server (see `local-llama` above) to run a judge with no external API call at all.
+
+Panel output — every judge's vote plus the consensus — appears in both report formats: a "Panel deliberation" section in the markdown report, and the `panels` array in `--format json`.
+
+> **Honest status:** the default (no `--judges`) is unchanged single-Claude v1; the jury and its accuracy claims are validated offline with synthetic judges, and the real-model agreement/lift numbers require API keys (`evals/jury_eval.py`, not yet run against live models).
+
 ## The eval-science backbone
 
 The judge is **measured, not asserted.** A curated golden dataset of **44 labeled cases** with **multi-label ground truth** (`src/asc_metadata_verifier/evals/golden/cases.jsonl` — 30 positives across all 8 rubric dimensions + 14 clean controls engineered to stress false positives) runs through a **pydantic-evals** meta-eval (`src/asc_metadata_verifier/evals/meta_eval.py`) that computes per-dimension precision/recall and overall accuracy over a full 44×8 one-vs-rest grid, plus a failure taxonomy (`false_negative` / `false_positive` / `wrong_dimension` / `wrong_severity`). Multi-label ground truth means a case that legitimately trips two dimensions (e.g. a keyword list that both stuffs keywords *and* names a competitor's trademark) isn't scored as a judge false positive. `BUILD_LOG.md` records the pre-registered methodology and the honest status of the real-model run (not yet executed — no key in the dev environment; no numbers fabricated).

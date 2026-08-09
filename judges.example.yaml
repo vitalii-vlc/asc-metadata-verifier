@@ -1,0 +1,20 @@
+# Example jury configuration for `asc-verify --judges judges.yaml`.
+# Secrets are referenced by ENV VAR NAME only — never put a raw key here.
+# Default consensus when omitted: majority_severe. Override per run with --consensus.
+consensus: majority_severe
+judges:
+  - name: claude
+    provider: anthropic
+    model: claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+    vision: true
+  - name: gpt4o
+    provider: openai            # provider "openai" = OpenAI OR any OpenAI-compatible endpoint
+    model: gpt-4o
+    api_key_env: OPENAI_API_KEY
+    vision: true
+  - name: local-llama           # self-hosted via an OpenAI-compatible server (Ollama/vLLM/LM Studio)
+    provider: openai
+    model: llama3.1:70b
+    base_url: http://localhost:11434/v1
+    vision: false

@@ -5,7 +5,9 @@ from asc_metadata_verifier.models import (
     AppMetadata,
     DeterministicFinding,
     GateReport,
+    JudgeVote,
     LocaleMetadata,
+    PanelVerdict,
     RubricVerdict,
     Screenshot,
 )
@@ -151,3 +153,56 @@ def test_gate_report_construct_and_check():
     assert len(report.verdicts) == 1
     assert len(report.deterministic_findings) == 1
     assert report.guidelines_available is True
+
+
+def _rv(verdict="fail", severity="high", confidence=0.9, field="description"):
+    return RubricVerdict(
+        dimension="placeholder_text",
+        verdict=verdict,
+        severity=severity,
+        confidence=confidence,
+        rationale="r",
+        locale="en-US",
+        field=field,
+    )
+
+
+def test_judge_vote_voted_carries_verdict():
+    v = JudgeVote(judge="claude", status="voted", verdict=_rv(), latency_ms=12.0)
+    assert v.status == "voted"
+    assert v.verdict.verdict == "fail"
+
+
+def test_judge_vote_error_and_defaults():
+    v = JudgeVote(judge="local", status="error", error="boom")
+    assert v.verdict is None and v.error == "boom" and v.latency_ms is None
+
+
+def test_panel_verdict_roundtrips_and_holds_votes():
+    p = PanelVerdict(
+        locale="en-US",
+        dimension="placeholder_text",
+        field="description",
+        votes=[
+            JudgeVote(judge="a", status="voted", verdict=_rv()),
+            JudgeVote(judge="b", status="not_applicable"),
+        ],
+        consensus=_rv(),
+        policy="majority_severe",
+        agreement=0.5,
+    )
+    again = PanelVerdict.model_validate_json(p.model_dump_json())
+    assert again.consensus.verdict == "fail"
+    assert [x.status for x in again.votes] == ["voted", "not_applicable"]
+
+
+def test_gate_report_panels_defaults_empty_and_is_additive():
+    r = GateReport(status="PASS", guidelines_available=True)
+    assert r.panels == []
+    r2 = GateReport(
+        status="BLOCK",
+        guidelines_available=True,
+        verdicts=[_rv()],
+        panels=[],
+    )
+    assert GateReport.model_validate_json(r2.model_dump_json()).status == "BLOCK"

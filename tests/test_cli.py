@@ -222,3 +222,129 @@ class TestRunVerifyHelper:
         assert llm_skipped is True
         assert report.status in {"PASS", "WARN", "BLOCK"}
         assert report.verdicts == []
+
+
+class TestJuryPath:
+    def _judges_file(self, tmp_path):
+        p = tmp_path / "judges.yaml"
+        p.write_text(
+            "consensus: most_severe\n"
+            "judges:\n"
+            "  - {name: a, provider: anthropic, model: claude-sonnet-5}\n"
+            "  - {name: b, provider: anthropic, model: claude-opus-4-8}\n",
+            encoding="utf-8",
+        )
+        return p
+
+    def test_jury_runs_panel_and_emits_panels_in_json(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        # Stub build_panel to avoid real models: a panel whose run_panel returns
+        # one BLOCK-worthy PanelVerdict.
+        from asc_metadata_verifier.models import JudgeVote, PanelVerdict, RubricVerdict
+
+        rv = RubricVerdict(dimension="placeholder_text", verdict="fail", severity="high",
+                           confidence=0.9, rationale="r", offending_quote="Lorem",
+                           locale="en-US", field="description")
+
+        class StubPanel:
+            def run_panel(self, *a, **k):
+                return [PanelVerdict(locale="en-US", dimension="placeholder_text",
+                                     field="description",
+                                     votes=[JudgeVote(judge="a", status="voted", verdict=rv),
+                                            JudgeVote(judge="b", status="voted", verdict=rv)],
+                                     consensus=rv, policy="most_severe", agreement=1.0)]
+
+        monkeypatch.setattr(cli, "build_panel", lambda *a, **k: StubPanel())
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--judges",
+                                         str(self._judges_file(tmp_path)), "--format", "json"])
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "BLOCK"
+        assert len(payload["panels"]) == 1
+        assert payload["panels"][0]["votes"][0]["judge"] == "a"
+
+    def test_all_unavailable_judges_degrades_to_deterministic(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+        p = tmp_path / "j.yaml"
+        p.write_text(
+            "judges:\n"
+            "  - {name: g, provider: openai, model: gpt-4o, api_key_env: OPENAI_API_KEY}\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--judges", str(p)])
+        assert result.exit_code == 0, result.output
+        assert "LLM checks skipped" in result.output
+
+    def test_consensus_without_judges_is_a_usage_error(self):
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--consensus", "most_severe"])
+        assert result.exit_code == 2 and "Traceback" not in result.output
+
+    def test_bad_consensus_name_exits_2_actionably(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+        p = self._judges_file(tmp_path)
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--judges", str(p), "--consensus", "bogus"])
+        assert result.exit_code == 2 and "Traceback" not in result.output
+
+    def test_degraded_jury_run_warns_on_stderr_but_still_exits_0(self, tmp_path, monkeypatch):
+        """Fix 1: every judge call failing at runtime must not be a silent
+        green PASS -- a WARNING lands on stderr even though the gate still
+        conservatively passes (exit 0, no exit-code change)."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        from asc_metadata_verifier.models import JudgeVote, PanelVerdict, RubricVerdict
+
+        empty_rv = RubricVerdict(dimension="placeholder_text", verdict="pass", severity="low",
+                                 confidence=0.0,
+                                 rationale="No judge produced a verdict for this unit.",
+                                 locale="en-US", field="description")
+
+        class StubPanel:
+            def run_panel(self, *a, **k):
+                return [PanelVerdict(
+                    locale="en-US", dimension="placeholder_text", field="description",
+                    votes=[JudgeVote(judge="a", status="error", error="revoked key"),
+                           JudgeVote(judge="b", status="error", error="revoked key")],
+                    consensus=empty_rv, policy="most_severe", agreement=None,
+                )]
+
+        monkeypatch.setattr(cli, "build_panel", lambda *a, **k: StubPanel())
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--judges",
+                                         str(self._judges_file(tmp_path))])
+
+        assert result.exit_code == 0, result.output
+        assert "WARNING" in result.output
+        assert "judge call(s) failed" in result.output
+
+    def test_healthy_jury_run_has_no_degraded_warning(self, tmp_path, monkeypatch):
+        """Regression guard: a healthy jury run must not print the new WARNING."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        from asc_metadata_verifier.models import JudgeVote, PanelVerdict, RubricVerdict
+
+        rv = RubricVerdict(dimension="placeholder_text", verdict="pass", severity="low",
+                           confidence=0.9, rationale="r", locale="en-US", field="description")
+
+        class StubPanel:
+            def run_panel(self, *a, **k):
+                return [PanelVerdict(
+                    locale="en-US", dimension="placeholder_text", field="description",
+                    votes=[JudgeVote(judge="a", status="voted", verdict=rv),
+                           JudgeVote(judge="b", status="voted", verdict=rv)],
+                    consensus=rv, policy="most_severe", agreement=1.0,
+                )]
+
+        monkeypatch.setattr(cli, "build_panel", lambda *a, **k: StubPanel())
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--judges",
+                                         str(self._judges_file(tmp_path))])
+
+        assert result.exit_code == 0, result.output
+        assert "WARNING" not in result.output

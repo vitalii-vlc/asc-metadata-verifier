@@ -22,8 +22,9 @@ from typing import TYPE_CHECKING
 from pydantic_ai import Agent
 
 from asc_metadata_verifier.guidelines.source import Guidelines
+from asc_metadata_verifier.judge import prompts
 from asc_metadata_verifier.judge.rubric import RubricDimension
-from asc_metadata_verifier.models import AppMetadata, LocaleMetadata, RubricVerdict
+from asc_metadata_verifier.models import AppMetadata, RubricVerdict
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
@@ -33,25 +34,8 @@ if TYPE_CHECKING:
 # names, e.g. "anthropic:claude-sonnet-5").
 DEFAULT_JUDGE_MODEL = "claude-sonnet-5"
 
-SYSTEM_PROMPT = (
-    "You are an App Store metadata rejection-risk judge. Given a rubric "
-    "dimension, a locale's metadata fields, and (optionally) grounding text "
-    "from the current App Store Review Guidelines, return a structured "
-    "verdict. Cite `guideline_ref` ONLY using the provided grounding text; if "
-    "NO grounding text is provided, `guideline_ref` MUST be null. Never invent "
-    "a guideline reference. Quote the offending span verbatim in "
-    "`offending_quote`."
-)
-
-# The locale text fields shown to the judge, in a stable order.
-_TEXT_FIELDS = (
-    "app_name",
-    "subtitle",
-    "promotional_text",
-    "keywords",
-    "description",
-    "whats_new",
-)
+# Module alias kept so any external import of `SYSTEM_PROMPT` still resolves.
+SYSTEM_PROMPT = prompts.TEXT_SYSTEM_PROMPT
 
 
 def build_judge(model: Model | str | None = None) -> Agent[None, RubricVerdict]:
@@ -69,59 +53,10 @@ def build_judge(model: Model | str | None = None) -> Agent[None, RubricVerdict]:
         return Agent(
             f"anthropic:{model_name}",
             output_type=RubricVerdict,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=prompts.TEXT_SYSTEM_PROMPT,
             defer_model_check=True,
         )
-    return Agent(model, output_type=RubricVerdict, system_prompt=SYSTEM_PROMPT)
-
-
-def _format_fields(locale_meta: LocaleMetadata) -> str:
-    lines = []
-    for name in _TEXT_FIELDS:
-        value = getattr(locale_meta, name, None)
-        lines.append(f"{name}: {value if value is not None else ''}")
-    return "\n".join(lines)
-
-
-def _grounding_for(guidelines: Guidelines, dimension: RubricDimension) -> str:
-    """Resolve grounding text for a dimension, or '' when none is available.
-
-    Never fabricates: returns '' unless the guidelines were actually fetched.
-    """
-    if not guidelines.available:
-        return ""
-    return (
-        guidelines.sections.get(dimension.guideline_hint)
-        or guidelines.sections.get("2.3")
-        or guidelines.text
-    )
-
-
-def _build_prompt(
-    dimension: RubricDimension, locale_meta: LocaleMetadata, grounding: str
-) -> str:
-    parts = [
-        f"Rubric dimension id: {dimension.id}",
-        f"What this dimension flags: {dimension.description}",
-        "",
-        f"Locale: {locale_meta.locale}",
-        "Metadata fields:",
-        _format_fields(locale_meta),
-    ]
-    if grounding:
-        parts += [
-            "",
-            "Grounding text from the CURRENT App Store Review Guidelines:",
-            grounding,
-            "",
-            "Cite `guideline_ref` only using the grounding text above.",
-        ]
-    else:
-        parts += [
-            "",
-            "No grounding text is available. `guideline_ref` MUST be null.",
-        ]
-    return "\n".join(parts)
+    return Agent(model, output_type=RubricVerdict, system_prompt=prompts.TEXT_SYSTEM_PROMPT)
 
 
 def judge_field(
@@ -142,8 +77,8 @@ def judge_field(
     verdicts: list[RubricVerdict] = []
     for locale_meta in meta.locales:
         for dimension in dimensions:
-            grounding = _grounding_for(guidelines, dimension)
-            prompt = _build_prompt(dimension, locale_meta, grounding)
+            grounding = prompts.grounding_for_text(guidelines, dimension)
+            prompt = prompts.build_text_prompt(dimension, locale_meta, grounding)
             result = agent.run_sync(prompt)
 
             update: dict[str, object] = {
@@ -151,7 +86,7 @@ def judge_field(
                 "dimension": dimension.id,
             }
             # Force-None keys on the grounding ACTUALLY USED for this call, not
-            # merely on `guidelines.available`: `_grounding_for` can return ""
+            # merely on `guidelines.available`: `grounding_for_text` can return ""
             # even when available is True (empty text + sections), and in that
             # case the prompt already told the model to return null -- so layer 2
             # must agree with layer 1 and scrub any ref regardless.

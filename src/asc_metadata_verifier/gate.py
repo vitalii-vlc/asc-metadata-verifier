@@ -11,7 +11,12 @@ then the overall `GateReport.status` is rolled up from those levels per the
 
 from typing import Literal
 
-from asc_metadata_verifier.models import DeterministicFinding, GateReport, RubricVerdict
+from asc_metadata_verifier.models import (
+    DeterministicFinding,
+    GateReport,
+    PanelVerdict,
+    RubricVerdict,
+)
 
 Level = Literal["block", "warn", "none"]
 
@@ -53,6 +58,7 @@ def evaluate(
     deterministic_findings: list[DeterministicFinding],
     fail_on: Literal["fail", "warn"] = "fail",
     guidelines_available: bool = True,
+    panels: list[PanelVerdict] | None = None,
 ) -> GateReport:
     """Aggregate verdicts + deterministic findings into a single GateReport.
 
@@ -83,4 +89,5 @@ def evaluate(
         verdicts=verdicts,
         deterministic_findings=deterministic_findings,
         guidelines_available=guidelines_available,
+        panels=panels or [],
     )

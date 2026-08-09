@@ -34,15 +34,24 @@ from asc_metadata_verifier.ingest.base import IngestError
 from asc_metadata_verifier.ingest.fastlane import FastlaneAdapter
 from asc_metadata_verifier.ingest.yaml_source import YamlAdapter
 from asc_metadata_verifier.judge.agent import judge_field
+from asc_metadata_verifier.judge.config import (
+    JudgeConfigError,
+    JudgeSet,
+    judges_from_cli,
+    load_judges,
+    merge_specs,
+)
+from asc_metadata_verifier.judge.consensus import DEFAULT_POLICY, POLICIES
+from asc_metadata_verifier.judge.panel import build_panel
 from asc_metadata_verifier.judge.rubric import DIMENSIONS
-from asc_metadata_verifier.judge.vision import judge_screenshots
+from asc_metadata_verifier.judge.vision import VISION_DIMENSIONS, judge_screenshots
 from asc_metadata_verifier.observability import configure_logfire, span
 from asc_metadata_verifier.report import exit_code, render_json, render_markdown
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
-    from asc_metadata_verifier.models import GateReport
+    from asc_metadata_verifier.models import GateReport, PanelVerdict
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
@@ -55,6 +64,44 @@ class OutputFormat(StrEnum):
 class FailOn(StrEnum):
     warn = "warn"
     fail = "fail"
+
+
+def _build_judge_set(
+    judges_path: str | Path | None,
+    judge_cli: list[str] | None,
+    consensus_override: str | None,
+) -> JudgeSet:
+    """Resolve a `JudgeSet` from `--judges`/`--judge`/`--consensus`.
+
+    File specs (if any) are loaded first via `load_judges`; CLI `--judge`
+    mini-syntax specs are then merged in on top (CLI overrides a file entry
+    of the same name, unmatched CLI specs are appended). A `--consensus`
+    override, if given, wins over the file's `consensus` (or the default
+    policy when there is no file at all). Raises `JudgeConfigError` for an
+    empty resulting spec list or an unrecognized consensus policy name --
+    both are actionable usage errors, not tracebacks.
+    """
+    if judges_path is not None:
+        judge_set = load_judges(judges_path)
+        specs, consensus = judge_set.specs, judge_set.consensus
+    else:
+        specs, consensus = [], DEFAULT_POLICY
+
+    if judge_cli:
+        specs = merge_specs(specs, judges_from_cli(judge_cli))
+
+    if consensus_override is not None:
+        consensus = consensus_override
+
+    if not specs:
+        raise JudgeConfigError("No judges configured -- provide --judges and/or --judge.")
+
+    if consensus not in POLICIES:
+        raise JudgeConfigError(
+            f"Unknown consensus policy {consensus!r}; must be one of {sorted(POLICIES)}"
+        )
+
+    return JudgeSet(specs=specs, consensus=consensus)
 
 
 def run_verify(
@@ -70,6 +117,10 @@ def run_verify(
     guidelines_path: str | Path | None = None,
     dry_run: bool = False,
     judge_model: Model | str | None = None,
+    judges_path: str | Path | None = None,
+    judge_cli: list[str] | None = None,
+    consensus: str | None = None,
+    max_concurrency: int = 8,
 ) -> tuple[GateReport, bool]:
     """Run the full verification pipeline; return `(report, llm_skipped)`.
 
@@ -95,7 +146,25 @@ def run_verify(
     vision judge (Task 17) additionally requires `not no_vision` and at least
     one screenshot in the ingested metadata; when it runs, its verdicts are
     appended alongside the text judge's in the same list passed to `evaluate`.
+
+    A jury (multi-LLM panel) is used instead of the single-judge path
+    whenever `judges_path` and/or `judge_cli` is given (`jury_requested`).
+    `--consensus` without either is a `typer.BadParameter` -- there is no
+    jury for it to apply to. When a jury is requested, `_build_judge_set`
+    resolves the merged spec list + consensus policy and `build_panel`
+    builds the panel; if every judge is unavailable (no key/model), that
+    degrades to the same deterministic-only `llm_skipped=True` outcome as
+    the no-key v1 path. Otherwise the panel's per-unit consensus verdicts
+    populate `verdicts` (for the gate) and the full per-judge panel votes are
+    returned in the report's `panels` for the report to render.
     """
+    jury_requested = bool(judges_path or judge_cli)
+    if consensus is not None and not jury_requested:
+        raise typer.BadParameter(
+            "--consensus requires --judges and/or --judge -- there is no jury to "
+            "reach consensus over otherwise."
+        )
+
     configure_logfire()
     with span("verify"):
         asc_api_fields = {
@@ -135,6 +204,7 @@ def run_verify(
 
         guidelines = Guidelines(available=False, text="", sections={}, source="")
         verdicts = []
+        panels: list[PanelVerdict] = []
         llm_skipped = True
 
         if not dry_run:
@@ -143,22 +213,46 @@ def run_verify(
                     session_id=uuid.uuid4().hex, override_path=guidelines_path
                 )
 
-            has_key_or_model = judge_model is not None or os.environ.get("ANTHROPIC_API_KEY")
+            if jury_requested:
+                judge_set = _build_judge_set(judges_path, judge_cli, consensus)
+                panel = build_panel(judge_set.specs, judge_set.consensus, max_concurrency)
+                if panel is None:
+                    # Every configured judge is unavailable (no key/model) --
+                    # degrade to deterministic-only, same as the v1 no-key path.
+                    llm_skipped = True
+                else:
+                    with span("panel"):
+                        panels = panel.run_panel(
+                            meta,
+                            guidelines,
+                            DIMENSIONS,
+                            screenshots=meta.screenshots,
+                            vision_dimensions=VISION_DIMENSIONS,
+                            no_vision=no_vision,
+                        )
+                    verdicts = [p.consensus for p in panels]
+                    llm_skipped = False
+            else:
+                has_key_or_model = judge_model is not None or os.environ.get("ANTHROPIC_API_KEY")
 
-            if has_key_or_model:
-                with span("judge"):
-                    verdicts = judge_field(meta, guidelines, DIMENSIONS, model=judge_model)
-                llm_skipped = False
+                if has_key_or_model:
+                    with span("judge"):
+                        verdicts = judge_field(meta, guidelines, DIMENSIONS, model=judge_model)
+                    llm_skipped = False
 
-            if not no_vision and has_key_or_model and meta.screenshots:
-                with span("vision"):
-                    verdicts = verdicts + judge_screenshots(
-                        meta.screenshots, guidelines, model=judge_model
-                    )
+                if not no_vision and has_key_or_model and meta.screenshots:
+                    with span("vision"):
+                        verdicts = verdicts + judge_screenshots(
+                            meta.screenshots, guidelines, model=judge_model
+                        )
 
         with span("gate"):
             report = evaluate(
-                verdicts, det, fail_on=fail_on, guidelines_available=guidelines.available
+                verdicts,
+                det,
+                fail_on=fail_on,
+                guidelines_available=guidelines.available,
+                panels=panels,
             )
 
         return report, llm_skipped
@@ -215,6 +309,27 @@ def verify(
         "--dry-run",
         help="Skip the guidelines fetch and the judge; deterministic + gate only (offline).",
     ),
+    judges_path: Path | None = typer.Option(
+        None,
+        "--judges",
+        help="Path to a judges.yaml jury config (see judges.example.yaml). Given alone or "
+        "with --judge, this activates the multi-LLM jury instead of the single-judge path.",
+    ),
+    judge_cli: list[str] = typer.Option(
+        None,
+        "--judge",
+        help="Add/override one jury judge inline: '[name=]provider:model[@base_url]', e.g. "
+        "'anthropic:claude-sonnet-5'. Repeatable. Merges with --judges by name.",
+    ),
+    consensus: str | None = typer.Option(
+        None,
+        "--consensus",
+        help="Consensus policy for the jury (majority_severe, most_severe, unanimous, "
+        "confidence_weighted). Requires --judges and/or --judge.",
+    ),
+    max_concurrency: int = typer.Option(
+        8, "--max-concurrency", help="Max concurrent jury judge calls in flight at once."
+    ),
 ) -> None:
     """Verify App Store Connect metadata against deterministic checks and an LLM judge."""
     try:
@@ -229,8 +344,15 @@ def verify(
             fail_on=fail_on.value,
             guidelines_path=guidelines_path,
             dry_run=dry_run,
+            judges_path=judges_path,
+            judge_cli=judge_cli,
+            consensus=consensus,
+            max_concurrency=max_concurrency,
         )
     except IngestError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    except JudgeConfigError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from None
     except (FileNotFoundError, OSError, ValueError):

@@ -284,7 +284,8 @@ class TestJuryPath:
         result = runner.invoke(cli.app, [FIXTURE_ROOT, "--consensus", "most_severe"])
         assert result.exit_code == 2 and "Traceback" not in result.output
 
-    def test_bad_consensus_name_exits_2_actionably(self, tmp_path):
+    def test_bad_consensus_name_exits_2_actionably(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
         p = self._judges_file(tmp_path)
         result = runner.invoke(cli.app, [FIXTURE_ROOT, "--judges", str(p), "--consensus", "bogus"])
         assert result.exit_code == 2 and "Traceback" not in result.output

@@ -666,6 +666,22 @@ because there is no key in this environment to gate on — running it for real
 is future work, to be appended under a "Real-model actuals" heading (same
 pattern as the Task 13/15 meta-eval sections above) if and when it happens.
 
+**Real-model run — attempted 2026-08-09 (truncated; NO numbers reported).** A
+live 3-judge Claude panel (haiku-4.5 + sonnet-5 + opus-4.8, all via
+`ANTHROPIC_API_KEY`, grounding-free per the pre-registration) was run against the
+full 44-case golden set. A preflight confirmed **all three models return real
+structured verdicts through the panel** — the live-model jury path is validated
+end-to-end, not only against synthetic judges. The full agreement/lift collection
+reached ~700 of 1,056 grid cells before the API account ran out of credit and the
+run was stopped. Because a truncated grid mixes real verdicts with
+post-exhaustion error cells (which score as "not flagged" and would bias every
+rate), **no per-judge accuracy, Fleiss κ, or jury-vs-single lift is reported from
+it** — publishing partial/degraded numbers would violate the honesty bar. The
+completed statistics remain future work: re-run with sufficient credit through a
+**rate-limited** harness (the shipped `collect_grid` fans out all ~1k calls at
+once with no concurrency cap — fine for the instant offline fakes, but a live run
+must bound concurrency + retry, and refuse to report if any cell fails to vote).
+
 ### Task 10 — Documentation (this entry + README)
 
 README gained a "Multi-LLM jury (optional)" section: what the jury is, the

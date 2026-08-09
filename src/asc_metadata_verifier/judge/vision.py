@@ -23,52 +23,25 @@ raises; the run continues with the remaining screenshots.
 
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic_ai import Agent, BinaryContent
 
 from asc_metadata_verifier.guidelines.source import Guidelines
+from asc_metadata_verifier.judge import images, prompts
 from asc_metadata_verifier.models import RubricVerdict, Screenshot
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
-logger = logging.getLogger(__name__)
-
 # Default judge model; overridable via the ASC_JUDGE_MODEL env var, same
 # knob as the text judge (`judge/agent.py`) -- one env var controls both.
 DEFAULT_JUDGE_MODEL = "claude-sonnet-5"
 
-SYSTEM_PROMPT = (
-    "You are an App Store screenshot rejection-risk judge. Given a vision "
-    "rubric dimension, a screenshot image, and (optionally) grounding text "
-    "from the current App Store Review Guidelines, return a structured "
-    "verdict. Cite `guideline_ref` ONLY using the provided grounding text; if "
-    "NO grounding text is provided, `guideline_ref` MUST be null. Never invent "
-    "a guideline reference. `offending_quote` has no text span to quote for an "
-    "image -- leave it null or use it for a short textual description of what "
-    "you observed."
-)
-
-# Recognized image signatures, and the media type each one identifies.
-# Deliberately minimal (no OCR, no image preprocessing, no third-party image
-# library) -- just enough to avoid handing a non-image file to the vision
-# model. This is the SINGLE SOURCE OF TRUTH for `BinaryContent.media_type`:
-# it is derived from the matched signature (the actual bytes), never from the
-# file's extension, which can lie (a `.jpg`-named file containing PNG bytes,
-# or vice versa) -- `BinaryContent.media_type` is sent to the model verbatim
-# and is not re-sniffed downstream, so an extension-derived type can silently
-# mislabel the image.
-_IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"GIF87a", "image/gif"),
-    (b"GIF89a", "image/gif"),
-)
+# Module alias kept so any external import of `SYSTEM_PROMPT` still resolves.
+SYSTEM_PROMPT = prompts.VISION_SYSTEM_PROMPT
 
 
 @dataclass(frozen=True)
@@ -130,92 +103,10 @@ def build_vision_judge(model: Model | str | None = None) -> Agent[None, RubricVe
         return Agent(
             f"anthropic:{model_name}",
             output_type=RubricVerdict,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=prompts.VISION_SYSTEM_PROMPT,
             defer_model_check=True,
         )
-    return Agent(model, output_type=RubricVerdict, system_prompt=SYSTEM_PROMPT)
-
-
-def _read_image(screenshot: Screenshot) -> tuple[bytes, str] | None:
-    """Read and sanity-check local image bytes, or return None to skip.
-
-    Returns `(data, media_type)`, where `media_type` is derived from the
-    matched entry in `_IMAGE_SIGNATURES` (the actual bytes), NOT the file's
-    extension -- see the module-level comment on `_IMAGE_SIGNATURES`. Returns
-    None (logging a warning) when the path is a remote URL, the file is
-    missing/unreadable, or the bytes don't match a recognized image
-    signature. Never raises.
-    """
-    if screenshot.path.startswith("http://") or screenshot.path.startswith("https://"):
-        logger.warning(
-            "vision judge: skipping remote screenshot URL (Phase 2+ limitation, "
-            "not fetched): %s",
-            screenshot.path,
-        )
-        return None
-
-    path = Path(screenshot.path)
-    try:
-        data = path.read_bytes()
-    except OSError as exc:
-        logger.warning("vision judge: skipping unreadable screenshot %s: %s", path, exc)
-        return None
-
-    for signature, media_type in _IMAGE_SIGNATURES:
-        if data.startswith(signature):
-            return data, media_type
-
-    logger.warning(
-        "vision judge: skipping %s -- not a decodable image (unrecognized signature)",
-        path,
-    )
-    return None
-
-
-def _grounding_for(guidelines: Guidelines, dimension: VisionDimension) -> str:
-    """Resolve grounding text for a dimension, or '' when none is available.
-
-    Never fabricates: returns '' unless the guidelines were actually fetched.
-    Screenshots don't map to one specific guideline section the way text
-    rubric dimensions do (via `guideline_hint`), so this falls back to the
-    general accurate-metadata section (2.3) or the raw guidelines text.
-
-    Documented simplification: `dimension` is accepted for signature symmetry
-    with the text judge's `judge.agent._grounding_for`, but is currently
-    unused -- ALL 4 `VISION_DIMENSIONS` share this same grounding text (there
-    is no per-dimension `guideline_hint` for vision, unlike `RubricDimension`
-    in `judge.rubric`).
-    """
-    if not guidelines.available:
-        return ""
-    return guidelines.sections.get("2.3") or guidelines.text
-
-
-def _build_prompt(dimension: VisionDimension, screenshot: Screenshot, grounding: str) -> str:
-    filename = Path(screenshot.path).name
-    parts = [
-        f"Vision rubric dimension id: {dimension.id}",
-        f"What this dimension flags: {dimension.description}",
-        "",
-        f"Locale: {screenshot.locale}",
-        f"Screenshot filename: {filename}",
-        f"Screenshot display type: {screenshot.display_type or 'unspecified'}",
-        "The screenshot image is attached below.",
-    ]
-    if grounding:
-        parts += [
-            "",
-            "Grounding text from the CURRENT App Store Review Guidelines:",
-            grounding,
-            "",
-            "Cite `guideline_ref` only using the grounding text above.",
-        ]
-    else:
-        parts += [
-            "",
-            "No grounding text is available. `guideline_ref` MUST be null.",
-        ]
-    return "\n".join(parts)
+    return Agent(model, output_type=RubricVerdict, system_prompt=prompts.VISION_SYSTEM_PROMPT)
 
 
 def judge_screenshots(
@@ -245,14 +136,14 @@ def judge_screenshots(
     verdicts: list[RubricVerdict] = []
 
     for screenshot in screenshots:
-        image = _read_image(screenshot)
+        image = images.read_image(screenshot)
         if image is None:
             continue
         image_bytes, media_type = image
 
         for dimension in VISION_DIMENSIONS:
-            grounding = _grounding_for(guidelines, dimension)
-            prompt = _build_prompt(dimension, screenshot, grounding)
+            grounding = prompts.grounding_for_vision(guidelines, dimension)
+            prompt = prompts.build_vision_prompt(dimension, screenshot, grounding)
             result = agent.run_sync(
                 [prompt, BinaryContent(data=image_bytes, media_type=media_type)]
             )

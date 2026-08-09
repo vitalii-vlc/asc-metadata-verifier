@@ -284,3 +284,29 @@ class TestExitCode:
             status="PASS", verdicts=[], deterministic_findings=[], guidelines_available=True
         )
         assert exit_code(report) == 0
+
+
+def test_markdown_shows_panel_deliberation_for_multi_voter_panels():
+    from asc_metadata_verifier.models import GateReport, JudgeVote, PanelVerdict, RubricVerdict
+    from asc_metadata_verifier.report import render_markdown
+
+    def rv(v):
+        return RubricVerdict(dimension="placeholder_text", verdict=v, severity="high",
+                             confidence=0.9, rationale="r", locale="en-US", field="description")
+    votes = [JudgeVote(judge="a", status="voted", verdict=rv("fail")),
+             JudgeVote(judge="b", status="voted", verdict=rv("fail")),
+             JudgeVote(judge="c", status="voted", verdict=rv("pass"))]
+    panel = PanelVerdict(locale="en-US", dimension="placeholder_text", field="description",
+                         votes=votes, consensus=rv("fail"), policy="majority_severe",
+                         agreement=2 / 3)
+    md = render_markdown(GateReport(status="BLOCK", guidelines_available=True,
+                                    verdicts=[rv("fail")], panels=[panel]))
+    assert "Panel deliberation" in md
+    assert "3 judges" in md and "majority_severe" in md
+
+
+def test_markdown_omits_panel_section_when_no_multivoter_panels():
+    from asc_metadata_verifier.models import GateReport
+    from asc_metadata_verifier.report import render_markdown
+    assert "Panel deliberation" not in render_markdown(
+        GateReport(status="PASS", guidelines_available=True))

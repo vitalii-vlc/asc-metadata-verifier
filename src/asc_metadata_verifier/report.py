@@ -5,9 +5,14 @@ the CLI (Task 12), which decides how to print/colorize what these functions
 return.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 
-from asc_metadata_verifier.models import DeterministicFinding, GateReport, RubricVerdict
+from asc_metadata_verifier.models import (
+    DeterministicFinding,
+    GateReport,
+    PanelVerdict,
+    RubricVerdict,
+)
 
 _NOT_AVAILABLE = "n/a"
 
@@ -54,6 +59,24 @@ def _render_verdicts(verdicts: list[RubricVerdict]) -> list[str]:
     return lines
 
 
+def _render_panels(panels: list[PanelVerdict]) -> list[str]:
+    multi = [p for p in panels if sum(1 for v in p.votes if v.status == "voted") >= 2]
+    if not multi:
+        return []
+    lines = ["## Panel deliberation", ""]
+    for p in multi:
+        voters = [v for v in p.votes if v.status == "voted"]
+        tally = Counter(v.verdict.verdict for v in voters)
+        breakdown = " / ".join(f"{n} {vd}" for vd, n in tally.most_common())
+        agr = "n/a" if p.agreement is None else f"{p.agreement:.2f}"
+        lines.append(
+            f"- **{p.locale} / {p.dimension}**: {len(voters)} judges → {breakdown} "
+            f"({p.policy} ⇒ {p.consensus.verdict}; agreement {agr})"
+        )
+    lines.append("")
+    return lines
+
+
 def _render_findings(findings: list[DeterministicFinding]) -> list[str]:
     lines = ["## Deterministic findings", ""]
     if not findings:
@@ -76,7 +99,10 @@ def render_markdown(report: GateReport) -> str:
       2. Rubric verdicts, grouped by locale x dimension; each non-pass
          verdict includes its field, offending quote, guideline reference
          (or "n/a"), rationale, and suggested fix.
-      3. Deterministic findings (locale, field, kind, detail).
+      3. Panel deliberation: one line per panel with >=2 voted judges,
+         showing the vote breakdown, policy, consensus, and agreement.
+         Omitted entirely when no panel has >=2 voted votes.
+      4. Deterministic findings (locale, field, kind, detail).
     """
     lines: list[str] = [f"# ASC Metadata Verifier Report: {report.status}", ""]
     if not report.guidelines_available:
@@ -84,6 +110,7 @@ def render_markdown(report: GateReport) -> str:
         lines.append("")
 
     lines.extend(_render_verdicts(report.verdicts))
+    lines.extend(_render_panels(report.panels))
     lines.extend(_render_findings(report.deterministic_findings))
 
     return "\n".join(lines).rstrip() + "\n"

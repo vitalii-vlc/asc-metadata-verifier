@@ -63,17 +63,26 @@ def _resolve_availability(spec: JudgeSpec) -> JudgeSpec:
 
 
 def _build_spec(raw: dict[str, Any]) -> JudgeSpec:
+    # Only the six known-safe fields are ever read from `raw` -- anything
+    # else the user put in the mapping (by mistake or otherwise) is neither
+    # forwarded to JudgeSpec nor echoed in the error below, so a stray
+    # secret-shaped key in a malformed entry can never leak into a message.
+    name = raw.get("name")
+    provider = raw.get("provider")
+    model = raw.get("model")
     try:
         return JudgeSpec(
-            name=raw.get("name"),
-            provider=raw.get("provider"),
-            model=raw.get("model"),
+            name=name,
+            provider=provider,
+            model=model,
             api_key_env=raw.get("api_key_env"),
             base_url=raw.get("base_url"),
             vision=raw.get("vision", False),
         )
     except ValidationError as exc:
-        raise JudgeConfigError(f"Invalid judge entry {raw!r}: {exc}") from exc
+        raise JudgeConfigError(
+            f"Invalid judge entry (name={name!r}, provider={provider!r}, model={model!r}): {exc}"
+        ) from exc
 
 
 def load_judges(path) -> JudgeSet:

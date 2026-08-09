@@ -53,33 +53,46 @@ class JudgeClient:
 
     async def run_text(self, dimension: RubricDimension, locale_meta: LocaleMetadata,
                        grounding: str) -> JudgeVote:
-        prompt = prompts.build_text_prompt(dimension, locale_meta, grounding)
-        # text: field is model-reported (v1 behavior) -> stamp only locale+dimension
-        return await self._run(self._text_agent, [prompt],
-                               locale_meta.locale, dimension.id, None, grounding)
+        # text: field is model-reported (v1 behavior) -> stamp only locale+dimension.
+        # Prompt building happens inside `_run`'s try so it can never raise into the caller.
+        return await self._run(
+            self._text_agent,
+            lambda: [prompts.build_text_prompt(dimension, locale_meta, grounding)],
+            locale_meta.locale, dimension.id, None, grounding,
+        )
 
     async def run_vision(self, screenshot: Screenshot, image_bytes: bytes, media_type: str,
                          dimension: VisionDimension, grounding: str) -> JudgeVote:
         if not self.supports_vision or self._vision_agent is None:
             return JudgeVote(judge=self.name, status="not_applicable")
-        prompt = prompts.build_vision_prompt(dimension, screenshot, grounding)
-        content = [prompt, BinaryContent(data=image_bytes, media_type=media_type)]
-        return await self._run(self._vision_agent, content,
+
+        def build_content():
+            prompt = prompts.build_vision_prompt(dimension, screenshot, grounding)
+            return [prompt, BinaryContent(data=image_bytes, media_type=media_type)]
+
+        return await self._run(self._vision_agent, build_content,
                                screenshot.locale, dimension.id, "screenshot", grounding)
 
-    async def _run(self, agent, content, locale, dimension, field, grounding) -> JudgeVote:
+    async def _run(self, agent, build_content, locale, dimension, field, grounding) -> JudgeVote:
+        """Run one agent call and stamp the verdict. Everything that can raise --
+        prompt/content construction, the model call, and the post-run `model_copy`
+        stamping -- lives inside this single `try` so `run_text`/`run_vision` truly
+        never raise into the panel; any failure anywhere in that path becomes an
+        `error` JudgeVote instead.
+        """
         start = time.monotonic()
         try:
+            content = build_content()
             result = await agent.run(content)
+            update: dict[str, object] = {"locale": locale, "dimension": dimension}
+            if field is not None:
+                update["field"] = field
+            if not grounding:
+                update["guideline_ref"] = None
+            verdict = result.output.model_copy(update=update)
         except Exception as exc:  # noqa: BLE001 - one judge's failure must not kill the panel
             return JudgeVote(judge=self.name, status="error", error=str(exc)[:_ERR_MAX],
                              latency_ms=(time.monotonic() - start) * 1000)
-        update: dict[str, object] = {"locale": locale, "dimension": dimension}
-        if field is not None:
-            update["field"] = field
-        if not grounding:
-            update["guideline_ref"] = None
-        verdict = result.output.model_copy(update=update)
         return JudgeVote(judge=self.name, status="voted", verdict=verdict,
                          latency_ms=(time.monotonic() - start) * 1000)
 

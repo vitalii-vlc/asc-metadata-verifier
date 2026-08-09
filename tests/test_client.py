@@ -4,6 +4,7 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from asc_metadata_verifier.guidelines.source import Guidelines
+from asc_metadata_verifier.judge import prompts
 from asc_metadata_verifier.judge.client import JudgeClient
 from asc_metadata_verifier.judge.rubric import DIMENSIONS
 from asc_metadata_verifier.judge.vision import VISION_DIMENSIONS
@@ -44,6 +45,7 @@ def test_run_text_votes_and_stamps_authoritatively():
     assert vote.verdict.locale == "en-US"                 # authoritative
     assert vote.verdict.dimension == "other_platform_mentions"
     assert vote.verdict.guideline_ref == "2.3.99"         # grounding present -> not scrubbed
+    assert vote.verdict.field == "description"            # text: model-reported, not stamped
 
 
 def test_run_text_scrubs_guideline_ref_when_no_grounding():
@@ -60,6 +62,19 @@ def test_run_text_error_becomes_error_vote_not_raise():
     lm = LocaleMetadata(locale="en-US", description="x")
     vote = asyncio.run(client.run_text(DIMENSIONS[0], lm, "g"))
     assert vote.status == "error" and "kaboom" in vote.error and vote.verdict is None
+
+
+def test_run_text_prompt_build_error_becomes_error_vote_not_raise(monkeypatch):
+    def boom(*_a, **_kw):
+        raise RuntimeError("prompt boom")
+
+    monkeypatch.setattr(prompts, "build_text_prompt", boom)
+    client = JudgeClient.from_model("c", _model(lambda t: _rv()))
+    lm = LocaleMetadata(locale="en-US", description="x")
+    vote = asyncio.run(client.run_text(DIMENSIONS[0], lm, "g"))
+    assert vote.status == "error"
+    assert "prompt boom" in vote.error
+    assert vote.verdict is None
 
 
 def test_non_vision_client_run_vision_is_not_applicable_without_a_call():

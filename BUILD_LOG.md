@@ -515,15 +515,22 @@ the one that maps to the brief's "OpenAIModel or OpenAIChatModel"
 instruction. `_model_ref` was written against `OpenAIChatModel(spec.model,
 provider=OpenAIProvider(base_url=..., api_key=...))` accordingly. The
 import did not raise `ModuleNotFoundError: openai` — the `openai` package
-(2.53.0) was already resolvable in this environment (pulled in
-transitively via another dependency's extra, per `uv tree`), so per the
-brief's conditional instruction no `openai` dependency was added to
-`pyproject.toml`. This is a latent risk worth flagging: `openai` is not an
-*explicit* project dependency, so if the transitive package that currently
-pulls it in is ever removed, `from_spec`'s OpenAI-compatible path would
-start raising `ModuleNotFoundError` at runtime. Not fixed here because the
-brief's instruction is conditioned on the import actually failing, which
-it did not.
+(2.53.0) was already resolvable in this environment, so per the brief's
+conditional instruction no `openai` dependency was added to
+`pyproject.toml`. **Correction (fix round 1):** an earlier version of this
+note called that a "latent risk" from a fragile transitive pull; that
+overstated it. `importlib.metadata.requires("pydantic-ai")` shows
+`pydantic-ai` (2.27.0) itself depends on
+`pydantic-ai-slim[anthropic,cli,evals,google,logfire,mcp,openai,retries,web]==2.27.0`
+— i.e. `openai` arrives via **this project's own direct `pydantic-ai>=2.27.0`
+dependency and its pinned, bundled `openai` extra**, not an incidental
+third-party pull that could disappear underneath us. It is a stable,
+intentional part of what `pydantic-ai` ships. Declaring `openai>=1.0`
+explicitly in `pyproject.toml` is still optional good practice (makes the
+dependency self-documenting, survives a hypothetical future `pydantic-ai`
+release that drops the bundled extra) — deferred to Task 5, when
+`from_spec`'s OpenAI-compatible path first gets exercised — but it is not
+a reliability risk today.
 
 Honesty stamping matches v1 exactly (verified against
 `judge/agent.py::judge_field` and `judge/vision.py::judge_screenshots`

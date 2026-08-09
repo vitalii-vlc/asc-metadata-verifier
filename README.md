@@ -178,7 +178,7 @@ A judge with no resolvable API key and no `base_url` is **unavailable** and is s
 
 Panel output — every judge's vote plus the consensus — appears in both report formats: a "Panel deliberation" section in the markdown report, and the `panels` array in `--format json`.
 
-> **Honest status:** the default (no `--judges`) is unchanged single-Claude v1; the jury and its accuracy claims are validated offline with synthetic judges, and the real-model agreement/lift numbers require API keys (`evals/jury_eval.py`, not yet run against live models).
+> **Honest status:** the default (no `--judges`) is unchanged single-Claude v1. The aggregation logic is validated offline with synthetic judges (`tests/test_jury_eval.py`). A live 3-judge Claude panel (haiku-4.5 + sonnet-5 + opus-4.8) has now been run over the full 44-case golden set — all 1,056 grid cells voted (0 errored). Headline: best single judge **95.5% (42/44)**; the `unanimous` policy reaches **100% (44/44)** — a genuine but modest **+2-case** lift — while `most_severe` is worse (−7 cases) and `majority`/`confidence_weighted` tie. Inter-judge Fleiss κ is high on objective categories (trademark 0.91, price 0.84) and low on subjective ones (placeholder 0.22). Small N; grounding-free; `confidence_weighted` is degenerate on the offline-scored path. Full breakdown + caveats in [`BUILD_LOG.md`](BUILD_LOG.md).
 
 ## The eval-science backbone
 

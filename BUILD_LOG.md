@@ -644,7 +644,7 @@ called out as a valid, fully expected-possible outcome that must be reported
 unchanged — never massaged, clamped, or hidden; there is no code path that
 floors `lift` at zero.
 
-**Not yet run against live models — no numbers fabricated:**
+**The three headline metrics — measured against live models 2026-08-09 (actuals below); each also validated offline first for aggregation-logic correctness:**
 
 - **Real per-judge accuracy** over the 44-case golden set, per configured
   judge (`evals/jury_eval.py::run(specs=...)` → `meta_eval.run` per judge).
@@ -653,34 +653,64 @@ floors `lift` at zero.
 - **Jury-vs-single-judge lift** per consensus policy (`jury_accuracy[policy] -
   best_single_accuracy`).
 
-All three require API keys for at least two configured judges (e.g.
-`ANTHROPIC_API_KEY` + `OPENAI_API_KEY`, or a self-hosted `base_url` judge) that
-are not present in this dev environment. What **has** been validated is the
-*aggregation logic* offline, against synthetic/fake judge clients:
-`collect_grid`, all four consensus policies, `fleiss_kappa`'s arithmetic, and
-the denominator guard are exercised by `tests/test_jury_eval.py` and pass —
-this proves the scoring machinery is correct, not that a real ensemble beats a
-real single judge. `uv run pytest tests/test_jury_eval.py -v` reproduces the
-offline evidence; there is no gated real-model test for this module yet
-because there is no key in this environment to gate on — running it for real
-is future work, to be appended under a "Real-model actuals" heading (same
-pattern as the Task 13/15 meta-eval sections above) if and when it happens.
+All three require API keys for at least two configured judges; a key was provided
+on 2026-08-09 and produced the **Real-model actuals** recorded below.
+Independently, the *aggregation logic* was validated offline first against
+synthetic/fake judge clients: `collect_grid`, all four consensus policies,
+`fleiss_kappa`'s arithmetic, and the denominator guard are exercised by
+`tests/test_jury_eval.py` and pass (`uv run pytest tests/test_jury_eval.py -v`) —
+proving the scoring machinery correct independently of any live run.
 
-**Real-model run — attempted 2026-08-09 (truncated; NO numbers reported).** A
-live 3-judge Claude panel (haiku-4.5 + sonnet-5 + opus-4.8, all via
-`ANTHROPIC_API_KEY`, grounding-free per the pre-registration) was run against the
-full 44-case golden set. A preflight confirmed **all three models return real
-structured verdicts through the panel** — the live-model jury path is validated
-end-to-end, not only against synthetic judges. The full agreement/lift collection
-reached ~700 of 1,056 grid cells before the API account ran out of credit and the
-run was stopped. Because a truncated grid mixes real verdicts with
-post-exhaustion error cells (which score as "not flagged" and would bias every
-rate), **no per-judge accuracy, Fleiss κ, or jury-vs-single lift is reported from
-it** — publishing partial/degraded numbers would violate the honesty bar. The
-completed statistics remain future work: re-run with sufficient credit through a
-**rate-limited** harness (the shipped `collect_grid` fans out all ~1k calls at
-once with no concurrency cap — fine for the instant offline fakes, but a live run
-must bound concurrency + retry, and refuse to report if any cell fails to vote).
+**Real-model actuals — 2026-08-09 (measured, grounding-free, 44-case golden set).**
+A live 3-judge Claude panel — **haiku-4.5, sonnet-5, opus-4.8** (all via
+`ANTHROPIC_API_KEY`) — was run over the full golden set through a rate-limited
+harness with an all-cells-voted integrity gate: **all 1,056 grid cells returned a
+real verdict (0 errored)**, so every number below is over the complete,
+un-shrunken set. (An earlier 2026-08-09 attempt was truncated by API-credit
+exhaustion at ~700/1,056 cells and reported NO numbers; this run replaces it.)
+
+Per-judge per-case accuracy: **haiku 95.5% (42/44) · opus 95.5% (42/44) · sonnet
+81.8% (36/44)**. Best single judge = 42/44.
+
+Jury accuracy by consensus policy, and lift vs the best single judge:
+
+| policy | accuracy | lift vs best single |
+|---|---|---|
+| `unanimous` | **100% (44/44)** | **+4.5% (+2 cases)** |
+| `majority_severe` (default) | 95.5% (42/44) | 0.0 |
+| `confidence_weighted` \* | 95.5% (42/44) | 0.0 |
+| `most_severe` | 79.5% (35/44) | −15.9% (−7 cases) |
+
+Inter-judge agreement (Fleiss' κ, flagged/not-flagged, per dimension): high on
+objective categories — third-party-trademark **0.91**, price-in-description
+**0.84**, unauthorized-contact-links **0.84**, beta/demo **0.83**,
+other-platform-mentions **0.80** — and lower on subjective ones —
+misleading-claims **0.42**, keyword-stuffing **0.43**, placeholder-text **0.22**.
+
+**Honest read of the pre-registered hypothesis** ("an ensemble beats the best
+single judge"): **partially supported.** Only the precision-favoring `unanimous`
+policy beats the best single judge, and only by 2 cases (100% vs 95.5%); the
+recall-favoring `most_severe` is markedly worse (−7 cases — its lone-judge false
+positives on clean controls dominate); `majority_severe` and `confidence_weighted`
+merely tie. On this set the ensemble's value is **precision**: all three judges
+already had near-perfect recall on the planted violations and differed mainly in
+false positives on clean controls, so requiring unanimity to flag suppresses those
+idiosyncratic single-judge errors. N is small (44 cases) — a 2-case swing is
+indicative, not decisive.
+
+\* `confidence_weighted` is **degenerate** on this offline-scored path: the
+collected grid retains only the verdict string, so all confidences are equal and
+the policy reduces to a summed-count majority (hence it equals `majority_severe`
+here). A faithful confidence-weighted figure needs the real per-vote confidences
+retained end-to-end — recorded as future work, not reported as a distinct result.
+
+Method notes: grounding-free (no live guideline citations), matching the
+pre-registered meta-eval methodology; the golden set is 44 realistic *synthetic*
+cases grounded in the 8 rubric dimensions + Apple §2.3/5.2 (see `evals/dataset.py`),
+so these figures characterize judge behavior on that curated set, not production
+App Store traffic. The shipped `collect_grid` fans out all ~1k calls at once
+(no concurrency cap — safe only for the instant offline fakes); this run used a
+bounded-concurrency runner with retry + the integrity gate.
 
 ### Task 10 — Documentation (this entry + README)
 

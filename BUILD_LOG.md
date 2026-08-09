@@ -491,3 +491,59 @@ judge has been exercised against the real service/model they target. No new
 accuracy or reliability numbers are claimed here; none were measured.
 
 --- END PHASE 2 ---
+
+## Multi-LLM Jury (sub-project A)
+
+### Task 4 — JudgeClient (async text+vision, error-isolated, honesty-preserving)
+
+`src/asc_metadata_verifier/judge/client.py` adds `JudgeClient`: one
+configured model wrapped as an async judge that votes on a text unit
+(`run_text`) and, if it supports vision, a screenshot unit (`run_vision`).
+Two constructors: `from_model(name, model, *, supports_vision=False)` for
+offline/injected models (used by all of `tests/test_client.py`), and
+`from_spec(spec)` for a resolved `JudgeSpec` (Task 5, not yet built —
+referenced only as a `TYPE_CHECKING` forward ref here, so this module
+imports cleanly before Task 5 lands).
+
+**Step 0 (provider API verification, done before writing `_model_ref`):**
+ran
+`uv run python -c "import importlib; m=importlib.import_module('pydantic_ai.models.openai'); print([n for n in dir(m) if 'Model' in n])"`
+against the installed `pydantic-ai` (2.27.x). It printed
+`OpenAIChatModel`, `OpenAIResponsesModel`, `OpenAIModelProfile`, ... —
+**there is no `OpenAIModel` class in this version**; `OpenAIChatModel` is
+the one that maps to the brief's "OpenAIModel or OpenAIChatModel"
+instruction. `_model_ref` was written against `OpenAIChatModel(spec.model,
+provider=OpenAIProvider(base_url=..., api_key=...))` accordingly. The
+import did not raise `ModuleNotFoundError: openai` — the `openai` package
+(2.53.0) was already resolvable in this environment (pulled in
+transitively via another dependency's extra, per `uv tree`), so per the
+brief's conditional instruction no `openai` dependency was added to
+`pyproject.toml`. This is a latent risk worth flagging: `openai` is not an
+*explicit* project dependency, so if the transitive package that currently
+pulls it in is ever removed, `from_spec`'s OpenAI-compatible path would
+start raising `ModuleNotFoundError` at runtime. Not fixed here because the
+brief's instruction is conditioned on the import actually failing, which
+it did not.
+
+Honesty stamping matches v1 exactly (verified against
+`judge/agent.py::judge_field` and `judge/vision.py::judge_screenshots`
+before writing `_run`): text stamps only `locale`+`dimension` (the model
+reports `field` itself); vision additionally stamps `field="screenshot"`;
+both force `guideline_ref=None` whenever the grounding actually used for
+that call is falsy. A non-vision client's `run_vision` returns
+`JudgeVote(status="not_applicable")` before building any prompt or
+touching the agent — `tests/test_client.py`'s
+`test_non_vision_client_run_vision_is_not_applicable_without_a_call`
+asserts the injected model function was never invoked. Any exception
+raised by `agent.run(...)` is caught in the single shared `_run` helper
+and converted to `JudgeVote(status="error", error=str(exc)[:300])` — never
+re-raised, so one judge's failure can't take down a panel run (Task 6+).
+
+`tests/test_client.py` is entirely offline, driven by the same
+`FunctionModel` pattern as `tests/test_judge.py`, using `asyncio.run(...)`
+to exercise the async methods directly (no `pytest-asyncio` dependency
+added). RED confirmed first (`ModuleNotFoundError` for the not-yet-created
+module), then GREEN after implementation. Full suite: 206 passed, 3
+skipped (same 3 pre-existing real-model `skipif` gates as before this
+task — none of this task's tests are network-gated). `ruff check .` clean
+repo-wide.

@@ -1263,25 +1263,32 @@ def test_fleiss_kappa_perfect_agreement_is_one():
     assert abs(fleiss_kappa(ratings) - 1.0) < 1e-9
 
 
-def test_fleiss_kappa_known_value():
+def test_fleiss_kappa_chance_level_is_zero():
     from asc_metadata_verifier.evals.jury_eval import fleiss_kappa
-    # chance-level agreement -> kappa near 0
-    ratings = [[2, 2], [2, 2], [2, 2]]
+    # genuine chance-level agreement (P_bar == P_e == 0.5) -> kappa exactly 0.0.
+    # NOTE: [[2,2],[2,2],[2,2]] is NOT chance-level — it is maximal below-chance
+    # disagreement and yields kappa = -1/3, not 0.
+    ratings = [[3, 1], [1, 3]]
     assert abs(fleiss_kappa(ratings)) < 1e-9
 
 
 class _FakeJudge:
-    """A judge that flags a fixed dimension with a fixed verdict on the full grid."""
-    def __init__(self, name, flag_dim, verdict="fail", supports_vision=False):
+    """A CONTENT-AWARE fake: flags `flag_dim` only when `trigger` appears in the
+    case text, so a "perfect" judge stays clean on controls (and therefore scores
+    a genuine 1.0 under meta_eval's UNCHANGED per-case rule — no massaging)."""
+    def __init__(self, name, flag_dim, trigger, verdict="fail", supports_vision=False):
         self.name = name
         self.supports_vision = supports_vision
         self._flag = flag_dim
+        self._trigger = trigger
         self._verdict = verdict
 
     async def run_text(self, dimension, locale_meta, grounding):
-        v = self._verdict if dimension.id == self._flag else "pass"
-        rv = RubricVerdict(dimension=dimension.id, verdict=v, severity="high", confidence=0.9,
-                           rationale="r", locale=locale_meta.locale, field="description")
+        text = " ".join(s for s in locale_meta.model_dump().values() if isinstance(s, str))
+        hit = dimension.id == self._flag and self._trigger in text
+        rv = RubricVerdict(dimension=dimension.id, verdict=self._verdict if hit else "pass",
+                           severity="high", confidence=0.9, rationale="r",
+                           locale=locale_meta.locale, field="description")
         return JudgeVote(judge=self.name, status="voted", verdict=rv)
 
     async def run_vision(self, *a, **k):
@@ -1305,8 +1312,8 @@ def _tiny_dataset():
 
 def test_run_offline_reports_perjudge_and_jury_accuracy_and_lift():
     from asc_metadata_verifier.evals.jury_eval import run
-    good = _FakeJudge("good", DIMENSIONS[0].id)          # flags the labeled dim (perfect here)
-    noisy = _FakeJudge("noisy", DIMENSIONS[1].id)        # never flags the labeled dim
+    good = _FakeJudge("good", DIMENSIONS[0].id, trigger="Lorem")   # flags d0 only on the "Lorem ipsum" positive -> perfect
+    noisy = _FakeJudge("noisy", DIMENSIONS[1].id, trigger="zzz")   # trigger never present -> never flags -> misses the positive
     rep = run(clients=[good, noisy], dataset=_tiny_dataset())
     assert rep.per_judge_accuracy["good"] == 1.0
     assert set(rep.jury_accuracy) == {"majority_severe", "most_severe", "unanimous", "confidence_weighted"}

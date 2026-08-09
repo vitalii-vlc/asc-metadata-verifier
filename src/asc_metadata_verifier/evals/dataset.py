@@ -16,7 +16,7 @@ term). ``expected_dimension`` is the single PRIMARY label; the optional
 a judge flag on them is an accepted secondary detection rather than a false
 positive. Single-label ground truth would falsely penalize a correct judge.
 
-Honesty note: the labels in ``golden/*.jsonl`` ARE the credential. Every row is
+Honesty note: the labels in ``golden/*.jsonl`` ARE the ground truth. Every row is
 a realistic SYNTHETIC example grounded in the 8 rubric dimensions and the real
 App Store Review Guidelines 2.3 / 5.2 categories; ``source_note`` states the
 category rationale rather than claiming a verbatim quote from a real app.

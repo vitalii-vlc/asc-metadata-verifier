@@ -57,7 +57,7 @@ ASC API ─┘   (normalize)      (canonical)     pre-checks        (Claude, one
 - **Session-scoped cache only.** Held in a session temp location (system temp / gitignored), reused across verify calls *within* the session, and **re-fetched in a new session** so it never goes stale. Never persisted to the repo — which also avoids redistributing Apple's copyrighted text.
 - **Offline / fetch-failure degradation (honest):** if the fetch fails (offline / page moved), deterministic checks still run and the judge runs *without* live citations, clearly flagging "guideline references unavailable (offline)" — it does **not** fabricate refs. `--guidelines <path>` supplies a local copy for offline runs.
 
-## The eval-science backbone (what makes this a credential, not a demo)
+## The eval-science backbone (measured, not asserted)
 Two honestly-separated uses of the Pydantic eval stack:
 - **pydantic-ai = the judge** (production verification *and* meta-eval).
 - **pydantic-evals = validating the judge.** `evals/golden/` holds a **curated golden dataset** (~30–50 real known-rejectable + known-clean metadata snippets drawn from actual App Store rejection reasons, each labeled with the correct verdict + dimension). A pydantic-evals `Dataset` runs the judge over it and reports **judge-vs-ground-truth agreement** (precision / recall / accuracy per dimension) plus a **failure taxonomy** of where the judge disagrees.
@@ -97,7 +97,7 @@ Full source→gate trace: ingest span → deterministic span → per-dimension j
 `uv run asc-verify <sample-flawed-fastlane>` → BLOCK with quoted, guideline-referenced findings + fixes; a Logfire trace of the run; `pydantic-evals` golden meta-eval reporting judge accuracy; `uvx library-skills` installs the bundled skill (or the documented manual fallback does); unit + meta-eval + e2e tests green; README + this spec + honest BUILD_LOG shipped.
 
 ## Pre-registration (honest estimate — to confirm before feature code)
-**Estimate: 7 working-days part-time** — signed off by Vitalii 2026-08-08 (AI-generated range was ~6–9; set at 7 by the senior engineer). Split: Phase 1 ~4–5, Phase 2 ~2–3. Top risks: (1) the undocumented `library-skills` convention (Task 1); (2) ASC-API JWT auth + response shape; (3) golden-dataset curation quality (garbage labels → meaningless agreement stats); (4) vision cost/latency; (5) live-guidelines fetch reliability / Apple page-structure drift.
+**Estimate: 7 working-days part-time** — signed off by the maintainer 2026-08-08 (AI-generated range was ~6–9; set at 7 by the maintainer). Split: Phase 1 ~4–5, Phase 2 ~2–3. Top risks: (1) the undocumented `library-skills` convention (Task 1); (2) ASC-API JWT auth + response shape; (3) golden-dataset curation quality (garbage labels → meaningless agreement stats); (4) vision cost/latency; (5) live-guidelines fetch reliability / Apple page-structure drift.
 
 ## Open questions
 - None blocking. The single unknown (library-skills convention) is scheduled as Task 1 rather than guessed.

@@ -200,9 +200,9 @@ spec+quality **review gate**, not a rubber stamp (see the fix rounds below, and
 Task 8's reviewer literally fetching the live Apple guidelines page to check the
 extraction logic against real markup, and Task 14's reviewer inspecting the actual
 built wheel rather than trusting the packaging config). The pre-registered estimate
-was **7 working-days part-time**, signed off by Vitalii on 2026-08-08 (design spec,
+was **7 working-days part-time**, signed off by the maintainer on 2026-08-08 (design spec,
 `docs/superpowers/specs/2026-08-08-asc-metadata-verifier-design.md:100`; AI-generated
-range was ~6–9, set at 7 by the senior engineer). This log does not fabricate a
+range was ~6–9, set at 7 by the maintainer). This log does not fabricate a
 measured elapsed-time actual against that estimate — the SDD ledger
 (`.superpowers/sdd/2026-08-08-asc-metadata-verifier/progress.md`) records task-by-task
 outcomes, not wall-clock time, so no elapsed-days number is claimed here.
@@ -215,7 +215,7 @@ the review gate doing its job, not a defect in the process:
 
 - **T5 (deterministic checks):** review flagged that the placeholder patterns
   (`TODO`, `XXX`, `FIXME`, `placeholder`) were unanchored, causing substring false
-  positives (e.g. "Maxxx", "placeholders", "expandable options"). Vitalii made an
+  positives (e.g. "Maxxx", "placeholders", "expandable options"). The maintainer made an
   explicit execution-time decision (via `AskUserQuestion`) to **anchor all four
   patterns with `\b…\b`** word boundaries; the plan doc was revised and the fix
   committed (`0d3e439`, `e9ce537`). This same anchoring is what Task 15's flawed
@@ -256,7 +256,7 @@ the review gate doing its job, not a defect in the process:
 The other 9 tasks (T1–T4, T6, T10, T12, T14, and T15 itself) passed review with no
 fix round, or (T15) required no pipeline fix at all — see below.
 
-### Controller design decisions to surface for Vitalii's review
+### Design decisions to surface for review
 
 Two decisions were made during execution, where the plan was silent or ambiguous,
 and are being surfaced explicitly here rather than left buried in commit history:
@@ -269,9 +269,9 @@ and are being surfaced explicitly here rather than left buried in commit history
    involved), while `placeholder` and `malformed_url` are **WARN-worthy**
    (heuristic signals that can have false positives). This is what makes
    `--dry-run` / no-`ANTHROPIC_API_KEY` mode still catch hard rejections even with
-   the judge fully skipped — worth Vitalii revisiting if the WARN/BLOCK split ever
+   the judge fully skipped — worth revisiting if the WARN/BLOCK split ever
    needs different risk tolerance (e.g. treating `malformed_url` as BLOCK too).
-2. **Placeholder patterns anchored with `\b…\b`.** Per Vitalii's T5 execution-time
+2. **Placeholder patterns anchored with `\b…\b`.** Per the maintainer's T5 execution-time
    decision above — flagged here again because it is a live tradeoff: word-boundary
    anchoring eliminates substring false positives (e.g. "placeholders"), but it
    also means a placeholder token embedded without word boundaries (rare, but e.g.

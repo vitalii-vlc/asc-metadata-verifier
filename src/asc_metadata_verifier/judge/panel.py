@@ -22,13 +22,26 @@ class JudgePanel:
         self.clients = list(clients)
         self.policy = policy
         self.policy_name = policy_name
-        self._sem = asyncio.Semaphore(max_concurrency)
+        self.max_concurrency = max_concurrency
+        self._sem: asyncio.Semaphore | None = None
 
     async def _bounded(self, coro):
         async with self._sem:
             return await coro
 
     async def judge_text(self, meta, guidelines, dimensions) -> list[PanelVerdict]:
+        # Built fresh on every top-level call rather than once in `__init__`:
+        # `asyncio.Semaphore` binds to whichever loop first `await`s it, and
+        # `run_panel` opens a new loop per call via `asyncio.run`. A
+        # semaphore built once in `__init__` would raise `RuntimeError:
+        # bound to a different event loop` the first time a SECOND
+        # `run_panel()` call on this same instance actually contends on it.
+        # Safe to assign here with no race: this line runs to completion
+        # before any `await`, so no other task can interleave and see a
+        # half-built semaphore. Still a single semaphore shared by every
+        # unit x judge call within this one call, i.e. concurrency
+        # semantics are unchanged.
+        self._sem = asyncio.Semaphore(self.max_concurrency)
         units = [(lm, d) for lm in meta.locales for d in dimensions]
 
         async def one(lm, d):
@@ -46,6 +59,11 @@ class JudgePanel:
     async def judge_vision(self, screenshots, guidelines, dimensions) -> list[PanelVerdict]:
         if not any(c.supports_vision for c in self.clients):
             return []
+        # Fresh semaphore for this entrypoint too -- see `judge_text` above.
+        # `run_panel` awaits `judge_text` to completion before calling this,
+        # so the two never contend on the semaphore concurrently; each still
+        # bounds its own unit x judge calls to `max_concurrency` in flight.
+        self._sem = asyncio.Semaphore(self.max_concurrency)
         prepared = []
         for s in screenshots:
             img = images.read_image(s)

@@ -59,6 +59,51 @@ def _render_verdicts(verdicts: list[RubricVerdict]) -> list[str]:
     return lines
 
 
+def compute_degradation(panels: list[PanelVerdict]) -> tuple[int, int]:
+    """Count signs of a degraded jury run across `panels`.
+
+    Returns `(error_votes, empty_tally_units)`:
+      - `error_votes`: total judge votes with `status == "error"` across all
+        panels (a runtime failure -- revoked key, bad model id, network --
+        as opposed to `abstained`/`not_applicable`, which are expected).
+      - `empty_tally_units`: panels (locale x dimension units) where NOT ONE
+        vote has `status == "voted"` -- every judge failed/abstained for
+        that unit, so the consensus policy fell back to its empty-tally
+        `pass` (see `judge.consensus._empty`) and the unit silently
+        defaulted to pass rather than reflecting a real judgment.
+
+    Both are 0 for a healthy run, so callers gate a warning on
+    `error_votes or empty_tally_units`. Shared by `render_markdown` (inline
+    note) and the CLI (`verify`'s stderr warning) so both surfaces agree on
+    what counts as "degraded".
+    """
+    error_votes = sum(1 for p in panels for v in p.votes if v.status == "error")
+    empty_tally_units = sum(1 for p in panels if not any(v.status == "voted" for v in p.votes))
+    return error_votes, empty_tally_units
+
+
+def _degradation_note(panels: list[PanelVerdict]) -> str | None:
+    """The markdown degraded-jury note, or None when the run is healthy.
+
+    Only mentions the parts that are non-zero, so e.g. an empty-tally unit
+    caused purely by abstains (0 errors) doesn't claim a false "N judge
+    call(s) failed".
+    """
+    error_votes, empty_tally_units = compute_degradation(panels)
+    if not error_votes and not empty_tally_units:
+        return None
+
+    parts = []
+    if error_votes:
+        parts.append(f"{error_votes} judge call(s) failed")
+    if empty_tally_units:
+        parts.append(
+            f"{empty_tally_units} unit(s) received no successful vote — "
+            "those units defaulted to pass"
+        )
+    return f"_Note: {' and '.join(parts)}. See --format json for per-judge errors._"
+
+
 def _render_panels(panels: list[PanelVerdict]) -> list[str]:
     multi = [p for p in panels if sum(1 for v in p.votes if v.status == "voted") >= 2]
     if not multi:
@@ -95,7 +140,12 @@ def render_markdown(report: GateReport) -> str:
 
     Sections, in order:
       1. Overall status heading, plus a note when guideline references were
-         unavailable (offline mode).
+         unavailable (offline mode), plus a note when the jury panel is
+         degraded (>=1 error vote and/or >=1 empty-tally unit -- see
+         `compute_degradation`). Gate semantics are unchanged by this note:
+         a degraded run still conservatively PASSes those units; the note
+         only makes that fact visible instead of silent. Neither note
+         appears for a healthy run.
       2. Rubric verdicts, grouped by locale x dimension; each non-pass
          verdict includes its field, offending quote, guideline reference
          (or "n/a"), rationale, and suggested fix.
@@ -107,6 +157,11 @@ def render_markdown(report: GateReport) -> str:
     lines: list[str] = [f"# ASC Metadata Verifier Report: {report.status}", ""]
     if not report.guidelines_available:
         lines.append("_Note: guideline references unavailable (offline)._")
+        lines.append("")
+
+    degradation_note = _degradation_note(report.panels)
+    if degradation_note is not None:
+        lines.append(degradation_note)
         lines.append("")
 
     lines.extend(_render_verdicts(report.verdicts))

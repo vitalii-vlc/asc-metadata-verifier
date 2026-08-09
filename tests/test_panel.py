@@ -99,6 +99,30 @@ def test_vision_runs_when_a_vision_client_present(tmp_path):
     assert {v.status for v in out[0].votes} == {"voted", "not_applicable"}
 
 
+def test_run_panel_twice_on_same_instance_does_not_raise_loop_error():
+    """Fix 2: `asyncio.Semaphore` binds to the running loop on first use.
+    Each `run_panel()` call opens a fresh loop via `asyncio.run`, so a
+    semaphore built once in `__init__` (and actually contended, i.e. blocked
+    on) would raise `RuntimeError: ... bound to a different event loop` on a
+    second `run_panel()` call on the SAME panel instance. mc=2 with 18
+    concurrent calls (3 units x 6 clients) forces real blocking, not just an
+    uncontended acquire."""
+    tracker = {"cur": 0, "max": 0}
+    clients = [FakeClient(f"c{i}", tracker=tracker) for i in range(6)]
+    panel = _panel(clients, mc=2)
+    meta = _meta()
+
+    out1 = panel.run_panel(meta, G, DIMENSIONS[:3])
+    assert len(out1) == 3
+    assert all(len(p.votes) == 6 and p.consensus.verdict == "fail" for p in out1)
+    assert tracker["max"] <= 2
+
+    out2 = panel.run_panel(meta, G, DIMENSIONS[:3])
+    assert len(out2) == 3
+    assert all(len(p.votes) == 6 and p.consensus.verdict == "fail" for p in out2)
+    assert tracker["max"] <= 2
+
+
 def test_run_panel_sync_concatenates_text_and_vision(tmp_path):
     png = tmp_path / "s.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)

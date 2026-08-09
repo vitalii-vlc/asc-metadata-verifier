@@ -46,7 +46,12 @@ from asc_metadata_verifier.judge.panel import build_panel
 from asc_metadata_verifier.judge.rubric import DIMENSIONS
 from asc_metadata_verifier.judge.vision import VISION_DIMENSIONS, judge_screenshots
 from asc_metadata_verifier.observability import configure_logfire, span
-from asc_metadata_verifier.report import exit_code, render_json, render_markdown
+from asc_metadata_verifier.report import (
+    compute_degradation,
+    exit_code,
+    render_json,
+    render_markdown,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
@@ -372,5 +377,22 @@ def verify(
 
     if llm_skipped and not dry_run:
         typer.echo("LLM checks skipped (no ANTHROPIC_API_KEY)", err=True)
+
+    error_votes, empty_tally_units = compute_degradation(report.panels)
+    if error_votes or empty_tally_units:
+        # Same conservative-pass gate semantics as always (no exit-code
+        # change) -- this just makes a degraded jury run visible to a
+        # human/CI even in --format json mode, where the markdown note
+        # (report.py's `_degradation_note`) wouldn't otherwise be seen.
+        parts = []
+        if error_votes:
+            parts.append(f"{error_votes} judge call(s) failed")
+        if empty_tally_units:
+            parts.append(f"{empty_tally_units} unit(s) defaulted to pass")
+        typer.echo(
+            f"WARNING: jury degraded -- {', '.join(parts)} "
+            "(see --format json for per-judge errors)",
+            err=True,
+        )
 
     raise typer.Exit(code=exit_code(report))

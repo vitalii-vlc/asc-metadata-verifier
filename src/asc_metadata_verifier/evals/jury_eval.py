@@ -40,6 +40,35 @@ METHODOLOGY (reuses ``meta_eval`` -- no new scoring rule is invented)
     ``dataset.cases``. No fabricated numbers -- every accuracy/agreement is
     computed from the judges' ACTUAL outputs (offline: the injected fakes' real
     outputs; real path: key-gated model calls, not run in this environment).
+
+REAL-PATH CAVEAT: ``lift`` IS NOT APPLES-TO-APPLES THERE (HONESTY DISCLOSURE)
+    The offline path IS apples-to-apples: a single scorer (``_case_correct``,
+    ``meta_eval``'s exact rule) is applied to ONE grid (``collect_grid``) for
+    both the per-judge numbers and the jury's per-cell consensus, so
+    ``lift = jury_accuracy - best_single_accuracy`` compares two views of the
+    SAME model outputs.
+
+    On the real (``specs``) path this breaks: per-judge accuracy comes from
+    ``meta_eval.run(model=...)`` (its own independent call to the model per
+    case/dimension), while jury accuracy still comes from this module's own
+    ``collect_grid`` (a SECOND, separate call to the same models). Because LLM
+    judges are stochastic, these are two INDEPENDENT samplings of the same
+    judges rather than one shared grid -- a judge's ``meta_eval.run`` verdict
+    on a given case can legitimately differ from its ``collect_grid`` verdict
+    on that same case purely from sampling noise, not from any real behavior
+    difference. So on the real path, ``lift`` is APPROXIMATE, not a strict
+    apples-to-apples comparison the way it is offline -- and this also
+    DOUBLE-BILLS API calls (every case/dimension/judge is scored twice: once
+    by ``meta_eval.run``, once by ``collect_grid``).
+
+    Recommendation before the first live (real-path) run: reuse the single
+    ``collect_grid`` result to derive per-judge accuracy too (via
+    ``_score_grid``, the same function already used for the offline path),
+    instead of a separate ``meta_eval.run`` call per judge. That would make
+    the real path apples-to-apples like the offline path AND halve its API
+    cost. Not implemented here -- this docstring only discloses the
+    limitation of the CURRENT real-path code in ``run()``; the computation
+    itself is unchanged.
 """
 
 from __future__ import annotations

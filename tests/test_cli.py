@@ -289,3 +289,62 @@ class TestJuryPath:
         p = self._judges_file(tmp_path)
         result = runner.invoke(cli.app, [FIXTURE_ROOT, "--judges", str(p), "--consensus", "bogus"])
         assert result.exit_code == 2 and "Traceback" not in result.output
+
+    def test_degraded_jury_run_warns_on_stderr_but_still_exits_0(self, tmp_path, monkeypatch):
+        """Fix 1: every judge call failing at runtime must not be a silent
+        green PASS -- a WARNING lands on stderr even though the gate still
+        conservatively passes (exit 0, no exit-code change)."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        from asc_metadata_verifier.models import JudgeVote, PanelVerdict, RubricVerdict
+
+        empty_rv = RubricVerdict(dimension="placeholder_text", verdict="pass", severity="low",
+                                 confidence=0.0,
+                                 rationale="No judge produced a verdict for this unit.",
+                                 locale="en-US", field="description")
+
+        class StubPanel:
+            def run_panel(self, *a, **k):
+                return [PanelVerdict(
+                    locale="en-US", dimension="placeholder_text", field="description",
+                    votes=[JudgeVote(judge="a", status="error", error="revoked key"),
+                           JudgeVote(judge="b", status="error", error="revoked key")],
+                    consensus=empty_rv, policy="most_severe", agreement=None,
+                )]
+
+        monkeypatch.setattr(cli, "build_panel", lambda *a, **k: StubPanel())
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--judges",
+                                         str(self._judges_file(tmp_path))])
+
+        assert result.exit_code == 0, result.output
+        assert "WARNING" in result.output
+        assert "judge call(s) failed" in result.output
+
+    def test_healthy_jury_run_has_no_degraded_warning(self, tmp_path, monkeypatch):
+        """Regression guard: a healthy jury run must not print the new WARNING."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        from asc_metadata_verifier.models import JudgeVote, PanelVerdict, RubricVerdict
+
+        rv = RubricVerdict(dimension="placeholder_text", verdict="pass", severity="low",
+                           confidence=0.9, rationale="r", locale="en-US", field="description")
+
+        class StubPanel:
+            def run_panel(self, *a, **k):
+                return [PanelVerdict(
+                    locale="en-US", dimension="placeholder_text", field="description",
+                    votes=[JudgeVote(judge="a", status="voted", verdict=rv),
+                           JudgeVote(judge="b", status="voted", verdict=rv)],
+                    consensus=rv, policy="most_severe", agreement=1.0,
+                )]
+
+        monkeypatch.setattr(cli, "build_panel", lambda *a, **k: StubPanel())
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--judges",
+                                         str(self._judges_file(tmp_path))])
+
+        assert result.exit_code == 0, result.output
+        assert "WARNING" not in result.output

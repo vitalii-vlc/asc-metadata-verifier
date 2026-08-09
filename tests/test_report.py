@@ -310,3 +310,114 @@ def test_markdown_omits_panel_section_when_no_multivoter_panels():
     from asc_metadata_verifier.report import render_markdown
     assert "Panel deliberation" not in render_markdown(
         GateReport(status="PASS", guidelines_available=True))
+
+
+class TestComputeDegradation:
+    """Fix 1: a jury that degrades at runtime (every judge call fails) must be
+    surfaced, not silently swallowed into a green PASS."""
+
+    def test_counts_error_votes_and_empty_tally_units(self):
+        from asc_metadata_verifier.models import JudgeVote, PanelVerdict, RubricVerdict
+        from asc_metadata_verifier.report import compute_degradation
+
+        def rv(v):
+            return RubricVerdict(dimension="d", verdict=v, severity="low", confidence=0.0,
+                                 rationale="r", locale="en-US", field="description")
+
+        # panel 1: totally empty-tally -- both judges errored.
+        empty_panel = PanelVerdict(
+            locale="en-US", dimension="placeholder_text", field="description",
+            votes=[JudgeVote(judge="a", status="error", error="revoked key"),
+                   JudgeVote(judge="b", status="error", error="revoked key")],
+            consensus=rv("pass"), policy="majority_severe", agreement=None,
+        )
+        # panel 2: healthy -- one voter, no errors.
+        healthy_panel = PanelVerdict(
+            locale="en-US", dimension="keyword_stuffing", field="description",
+            votes=[JudgeVote(judge="a", status="voted", verdict=rv("pass"))],
+            consensus=rv("pass"), policy="majority_severe", agreement=1.0,
+        )
+        error_votes, empty_tally_units = compute_degradation([empty_panel, healthy_panel])
+        assert error_votes == 2
+        assert empty_tally_units == 1
+
+    def test_zero_for_no_panels(self):
+        from asc_metadata_verifier.report import compute_degradation
+        assert compute_degradation([]) == (0, 0)
+
+
+class TestDegradedJuryNote:
+    """Fix 1: render_markdown must surface degradation loudly, without
+    changing gate semantics (still PASS/exit 0) or healthy-run output."""
+
+    def _rv(self, v="pass", **overrides):
+        from asc_metadata_verifier.models import RubricVerdict
+        defaults = dict(dimension="placeholder_text", verdict=v, severity="low",
+                        confidence=0.0, rationale="No judge produced a verdict for this unit.",
+                        locale="en-US", field="description")
+        defaults.update(overrides)
+        return RubricVerdict(**defaults)
+
+    def test_note_appears_when_every_vote_in_a_panel_errors(self):
+        from asc_metadata_verifier.models import GateReport, JudgeVote, PanelVerdict
+        from asc_metadata_verifier.report import render_markdown
+
+        panel = PanelVerdict(
+            locale="en-US", dimension="placeholder_text", field="description",
+            votes=[JudgeVote(judge="a", status="error", error="revoked key"),
+                   JudgeVote(judge="b", status="error", error="revoked key")],
+            consensus=self._rv(), policy="majority_severe", agreement=None,
+        )
+        report = GateReport(status="PASS", guidelines_available=True, panels=[panel])
+        md = render_markdown(report)
+
+        assert "2 judge call(s) failed" in md
+        assert "1 unit(s)" in md
+        assert "defaulted to pass" in md
+        assert "--format json" in md
+
+    def test_note_omits_error_count_when_empty_tally_has_no_errors(self):
+        """An empty-tally unit from abstains only (0 errors) must not claim
+        a nonzero "judge call(s) failed" count."""
+        from asc_metadata_verifier.models import GateReport, JudgeVote, PanelVerdict
+        from asc_metadata_verifier.report import render_markdown
+
+        panel = PanelVerdict(
+            locale="en-US", dimension="placeholder_text", field="description",
+            votes=[JudgeVote(judge="a", status="abstained"),
+                   JudgeVote(judge="b", status="not_applicable")],
+            consensus=self._rv(), policy="majority_severe", agreement=None,
+        )
+        report = GateReport(status="PASS", guidelines_available=True, panels=[panel])
+        md = render_markdown(report)
+
+        assert "judge call(s) failed" not in md
+        assert "1 unit(s)" in md and "defaulted to pass" in md
+
+    def test_no_degraded_note_for_healthy_multi_voter_report(self):
+        """Regression guard: a healthy panel (all judges voted, no errors)
+        must render exactly as before -- no degraded note at all."""
+        from asc_metadata_verifier.models import GateReport, JudgeVote, PanelVerdict
+        from asc_metadata_verifier.report import render_markdown
+
+        votes = [JudgeVote(judge="a", status="voted", verdict=self._rv("fail")),
+                 JudgeVote(judge="b", status="voted", verdict=self._rv("fail")),
+                 JudgeVote(judge="c", status="voted", verdict=self._rv("pass"))]
+        panel = PanelVerdict(locale="en-US", dimension="placeholder_text", field="description",
+                             votes=votes, consensus=self._rv("fail"),
+                             policy="majority_severe", agreement=2 / 3)
+        report = GateReport(status="BLOCK", guidelines_available=True,
+                            verdicts=[self._rv("fail")], panels=[panel])
+        md = render_markdown(report)
+
+        assert "judge call(s) failed" not in md
+        assert "defaulted to pass" not in md
+        assert "Note:" not in md or "offline" in md.lower()
+
+    def test_no_degraded_note_when_no_panels_at_all(self):
+        from asc_metadata_verifier.models import GateReport
+        from asc_metadata_verifier.report import render_markdown
+
+        md = render_markdown(GateReport(status="PASS", guidelines_available=True))
+        assert "judge call(s) failed" not in md
+        assert "defaulted to pass" not in md

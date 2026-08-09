@@ -13,7 +13,9 @@ def _vote(judge, verdict, severity="high", confidence=0.9, status="voted", field
 
 
 def _run(name, votes):
-    return POLICIES[name](votes, locale="en-US", dimension="placeholder_text", default_field="description")
+    return POLICIES[name](
+        votes, locale="en-US", dimension="placeholder_text", default_field="description"
+    )
 
 
 def test_registry_has_exactly_the_four_named_policies():

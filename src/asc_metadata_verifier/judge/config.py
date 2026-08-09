@@ -90,6 +90,8 @@ def load_judges(path) -> JudgeSet:
     try:
         with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f)
+    except OSError as exc:
+        raise JudgeConfigError(f"cannot read judges file {path}: {exc.strerror or exc}") from exc
     except yaml.YAMLError as exc:
         raise JudgeConfigError(f"Malformed YAML in {path}: {exc}") from exc
 
@@ -114,9 +116,11 @@ def load_judges(path) -> JudgeSet:
 
     specs: list[JudgeSpec] = []
     seen: set[str] = set()
-    for entry in judges_raw:
+    for i, entry in enumerate(judges_raw):
         if not isinstance(entry, dict):
-            raise JudgeConfigError(f"{path}: each judge entry must be a mapping, got {entry!r}")
+            raise JudgeConfigError(
+                f"{path}: judge entry #{i} must be a mapping, got {type(entry).__name__}"
+            )
         spec = _build_spec(entry)
         if spec.name in seen:
             raise JudgeConfigError(f"{path}: duplicate judge name {spec.name!r}")

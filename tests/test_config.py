@@ -66,6 +66,20 @@ def test_empty_judges_raises(tmp_path):
         load_judges(p)
 
 
+def test_non_mapping_judge_entry_does_not_leak_its_value(tmp_path):
+    secret = "sk-ant-secret-123"
+    p = _write(tmp_path, f"judges:\n  - {secret}\n")
+    with pytest.raises(JudgeConfigError) as exc_info:
+        load_judges(p)
+    assert secret not in str(exc_info.value)
+
+
+def test_missing_judges_file_raises_judge_config_error(tmp_path):
+    p = tmp_path / "does_not_exist.yaml"
+    with pytest.raises(JudgeConfigError):
+        load_judges(p)
+
+
 def test_cli_mini_syntax_parses_named_and_bare_and_base_url(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     specs = judges_from_cli([

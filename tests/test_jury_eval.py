@@ -126,3 +126,35 @@ def test_run_offline_reports_perjudge_and_jury_accuracy_and_lift():
     assert rep.jury_accuracy["most_severe"] >= 0.5
     for policy, lift in rep.lift.items():
         assert math.isclose(lift, rep.jury_accuracy[policy] - rep.best_single_accuracy)
+
+
+def _meta_report(n_cases):
+    """Minimal MetaEvalReport carrying only the fields the guard inspects."""
+    from asc_metadata_verifier.evals.meta_eval import MetaEvalReport
+
+    return MetaEvalReport(
+        per_dimension_precision={},
+        per_dimension_recall={},
+        accuracy=1.0,
+        failure_taxonomy={},
+        per_dimension_counts={},
+        n_cases=n_cases,
+    )
+
+
+def test_require_full_denominator_rejects_shrunken_report():
+    # Real-path guard: a per-judge report that scored fewer than ALL cases must
+    # be refused (a failed model call would else inflate accuracy -> lift).
+    import pytest
+
+    from asc_metadata_verifier.evals.jury_eval import _require_full_denominator
+
+    with pytest.raises(RuntimeError, match=r"scored 4/5 cases"):
+        _require_full_denominator(_meta_report(n_cases=4), expected_n=5, judge_name="j1")
+
+
+def test_require_full_denominator_accepts_full_report():
+    from asc_metadata_verifier.evals.jury_eval import _require_full_denominator
+
+    report = _meta_report(n_cases=5)
+    assert _require_full_denominator(report, expected_n=5, judge_name="j1") is report

@@ -292,6 +292,28 @@ def _jury_accuracy(grid, judges, dataset) -> dict[str, float]:
     return acc
 
 
+def _require_full_denominator(
+    report: MetaEvalReport, expected_n: int, judge_name: str
+) -> MetaEvalReport:
+    """Refuse a per-judge report that scored fewer than ALL cases.
+
+    On the real (specs) path each judge's accuracy comes from
+    ``meta_eval.run(model=<explicit model>)``. meta_eval's own shrunken-denominator
+    hard-fail only fires for ``model is None``, so with an explicit model a failed
+    model call on some cases would silently drop them from ``report.cases`` and
+    inflate that judge's accuracy -> ``best_single_accuracy`` -> every ``lift``.
+    "Never inflate the denominator" is a hard honesty constraint, so we verify the
+    full denominator here before any number derived from it is trusted.
+    """
+    if report.n_cases != expected_n:
+        raise RuntimeError(
+            f"real-model per-judge eval for {judge_name} scored "
+            f"{report.n_cases}/{expected_n} cases; refusing to report accuracy/lift "
+            "over a shrunken denominator"
+        )
+    return report
+
+
 def run(
     clients: list | None = None,
     specs: list[JudgeSpec] | None = None,
@@ -326,10 +348,14 @@ def run(
             raise RuntimeError(
                 "no available judges resolved from specs (missing API key/base_url?)"
             )
+        expected_n = len(dataset.cases)
         for spec in specs:
             if spec.available:
-                per_judge_report[spec.name] = meta_eval.run(
+                report = meta_eval.run(
                     model=_model_ref(spec), guidelines=guidelines, dataset=dataset
+                )
+                per_judge_report[spec.name] = _require_full_denominator(
+                    report, expected_n, spec.name
                 )
 
     grid = collect_grid(clients, dataset, guidelines)

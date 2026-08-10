@@ -851,3 +851,81 @@ already being touched for accuracy. Full suite: `uv run pytest -q` →
 real-model tests; 1 is `test_chroma_index_gated_behind_dependency`, skipped
 because `chromadb` isn't installed in this environment either — the same
 condition CI runs under). `uv run ruff check .` → **All checks passed!**
+
+## Code analyzer (sub-project C)
+
+Third of five v2 sub-projects. Spec + plan pre-registered
+(`docs/superpowers/specs/2026-08-10-code-analyzer-design.md`,
+`docs/superpowers/plans/2026-08-10-code-analyzer.md`) before any feature code.
+Built inline (the 200-subagent session cap was reached before Task 1, so the
+subagent-driven method fell back to controller-run inline TDD per the user's
+call — same test-first discipline and per-task commits, but no independent
+reviewer gate this session; the whole-branch self-review stands in).
+
+### What shipped
+
+A new `asc-verify code <project-path>` command running **deep AST-level static
+analysis** over a local Apple app project (Swift/Obj-C sources + `Info.plist` +
+`*.entitlements` + `PrivacyInfo.xcprivacy`), plus `verify --code <path>` which
+folds code findings into the unified PASS/WARN/BLOCK gate. Architecture:
+`code/project.py` (offline loader) → pluggable `SourceParser` (`code/parser.py`)
+→ a `Rule` REGISTRY (`code/rules/`) → `code/analyzer.py`, with an opt-in
+`code/jury.py` LLM layer.
+
+- **Parser strategy.** tree-sitter is the default offline backend
+  (`tree-sitter` + `tree-sitter-language-pack`, behind the `[code]` extra,
+  lazy-imported). Node types were **empirically verified** against
+  tree-sitter-language-pack 1.14.3 before coding the queries (swift identifiers
+  are `simple_identifier`; obj-c uses `identifier`/`type_identifier`; string
+  *content* lives in `line_str_text`/`string_content` children — read directly
+  so obj-c `@"..."` yields a clean value, not a `@"`-prefixed one). The optional
+  SwiftSyntax backend is a **BYO subprocess helper** (no importable pip package
+  exists), with a tested unavailable→tree-sitter fallback that never fabricates.
+- **Curated 10-rule catalog**, each mapped to a guideline section, each finding
+  anchored to `file:line` + evidence: privacy/tracking (5.1.x — idfa-without-att,
+  missing-usage-string, required-reason-api-undeclared, boilerplate-usage-string),
+  deprecated/private API (2.5.x — uiwebview-usage, private-api-symbol), security
+  (2.5.2 — ats-arbitrary-loads, insecure-http-endpoint), compliance
+  (encryption-export-undeclared, canopenurl-undeclared-scheme). The
+  cross-artifact rules (code symbol × manifest) are the AST win over regex.
+- **Opt-in jury** (`--jury`) reuses the metadata jury's `JudgeSpec` config,
+  consensus `POLICIES`, and `JudgeVote`/`PanelVerdict` models with code-specific
+  units; adjudicates interpretive findings and answers a fixed question set
+  (5.1.1(v) account-gating, 3.1.1 IAP-bypass). Off by default; error-isolated;
+  jury items tagged `source="jury"` with the full vote record.
+
+### Honesty invariants held
+
+- **Additive / offline by default.** With no `code` command and no `--code`,
+  `verify` is byte-unchanged and pulls zero new *core* deps (tree-sitter is
+  behind `[code]`). `code` with no `--jury` makes zero network calls.
+- **Never fabricate.** Missing manifest, unavailable parser backend, or absent
+  toolchain each produce a factual state; every finding points at real
+  `file:line` + evidence. Jury-sourced items are never presented as static fact.
+- **Curated, not exhaustive.** The rule catalog and the private-API /
+  required-reason denylists are documented as non-exhaustive with expected
+  false negatives — the analysis ceiling is AST-structural, not type inference
+  or data-flow, and the tool never claims otherwise.
+
+### Honest open items
+
+- The SwiftSyntax backend is exercised in tests only via a **fake helper**; no
+  real Swift toolchain runs in CI. The unavailable→tree-sitter fallback IS
+  directly tested. Nobody has run the backend against a real SwiftSyntax helper.
+- The `private-api-symbol` and `required-reason-api-undeclared` lists are curated
+  high-signal subsets, not Apple's full sets. `symbols()` is presence-based:
+  aliased/dynamically-constructed calls (`NSClassFromString`, KVC) are not
+  detected.
+- Symbol-presence findings report `line=1` (first-occurrence line resolution is
+  not yet threaded through `symbols()`); string/config findings carry real lines.
+- Persisting `code` runs via the repository (sub-project B) is not wired;
+  `CodeReport` is serializable, so it slots in later. The jury path is not cached.
+
+### Verification
+
+Built task-by-task (TDD, 11 tasks) on `feat/code-analyzer`. Full suite with the
+`[code]` extra: `uv run pytest -q` → **331 passed, 4 skipped** (3 real-model
+`ANTHROPIC_API_KEY`-gated, 1 ChromaIndex gated behind `semantic`).
+`uv run ruff check .` → **All checks passed!** A live end-to-end run over a
+synthetic flawed project surfaced 6 findings across 5 categories with correct
+`file:line`/evidence and a BLOCK gate (real exit code 1; clean project exit 0).

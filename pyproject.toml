@@ -3,6 +3,8 @@ name = "asc-metadata-verifier"
 version = "0.1.0"
 description = "LLM-as-judge gate for App Store Connect metadata"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "cryptography>=50.0.0",

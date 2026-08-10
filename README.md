@@ -200,4 +200,4 @@ The whole suite runs offline: model calls use pydantic-ai's `TestModel`/`Functio
 
 ## License
 
-Not yet chosen — see `LICENSE` (to be added). Until a license is added, all rights are reserved by default.
+MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Vitalii Komarovskyi.

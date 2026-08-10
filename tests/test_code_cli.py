@@ -48,6 +48,14 @@ def test_code_command_missing_path_exits_2():
     assert res.exit_code == 2 and "not found" in res.output
 
 
+def test_code_swiftsyntax_backend_falls_back_and_runs(tmp_path):
+    # No helper configured -> swiftsyntax is unavailable -> falls back to
+    # tree-sitter and still analyzes (must not traceback or exit 2).
+    _project(tmp_path, "let w = UIWebView()\n", {"ITSAppUsesNonExemptEncryption": False})
+    res = runner.invoke(app, ["code", str(tmp_path), "--backend", "swiftsyntax"])
+    assert res.exit_code == 1 and "uiwebview-usage" in res.output
+
+
 def test_verify_with_code_folds_findings(tmp_path):
     _project(tmp_path, "let w = UIWebView()\n", {"ITSAppUsesNonExemptEncryption": False})
     res = runner.invoke(

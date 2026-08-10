@@ -663,10 +663,11 @@ def _analyze_project(project_path, backend, swiftsyntax_cmd):
     """Shared static-analysis helper for `code` and `verify --code`.
 
     Loads the project, builds the parser, and returns
-    `(findings, parser_backend, analyzed_files)`. Exits 2 (actionable, no
-    traceback) when the path is missing or the default tree-sitter backend is
-    unavailable -- never silently returns zero findings as if the code were
-    clean."""
+    `(findings, parser_backend, analyzed_files, project, asts)`. Exits 2
+    (actionable, no traceback) when the path is missing or the resolved parser
+    is unavailable -- including the swiftsyntax(unavailable)->tree-sitter
+    fallback when the [code] extra itself is absent -- never silently returns
+    zero findings as if the code were clean, and never leaks a traceback."""
     from asc_metadata_verifier.code.analyzer import analyze
     from asc_metadata_verifier.code.parser import build_parser
     from asc_metadata_verifier.code.project import load_project
@@ -676,7 +677,7 @@ def _analyze_project(project_path, backend, swiftsyntax_cmd):
         raise typer.Exit(code=2) from None
 
     parser = build_parser(backend, swiftsyntax_cmd=swiftsyntax_cmd)
-    if not parser.available() and parser.backend_name.startswith("tree-sitter"):
+    if not parser.available():
         typer.echo(
             "Error: install the code-analysis extra:  uv sync --extra code  "
             "(pip install 'asc-metadata-verifier[code]')",

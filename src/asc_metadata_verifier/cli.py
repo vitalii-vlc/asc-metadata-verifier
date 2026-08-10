@@ -724,9 +724,13 @@ def code(
     if jury:
         from asc_metadata_verifier.code.jury import apply_jury
 
-        findings, jury_used = apply_jury(
-            findings, project, asts, judges=judges_path, policy=consensus
-        )
+        try:
+            findings, jury_used = apply_jury(
+                findings, project, asts, judges=judges_path, policy=consensus
+            )
+        except JudgeConfigError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2) from None
 
     from asc_metadata_verifier.code.analyzer import build_code_report
 

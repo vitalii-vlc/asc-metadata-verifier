@@ -17,7 +17,7 @@ from fabricating a guideline reference:
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic_ai import Agent
 
@@ -25,9 +25,17 @@ from asc_metadata_verifier.guidelines.source import Guidelines
 from asc_metadata_verifier.judge import prompts
 from asc_metadata_verifier.judge.rubric import RubricDimension
 from asc_metadata_verifier.models import AppMetadata, RubricVerdict
+from asc_metadata_verifier.persistence.cache import verdict_cache_key
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
+
+    class _VerdictCacheLike(Protocol):
+        """Duck-typed cache seam: anything with `.get`/`.put` for RubricVerdict."""
+
+        def get(self, key: str) -> RubricVerdict | None: ...
+
+        def put(self, key: str, verdict: RubricVerdict) -> None: ...
 
 # Default judge model; overridable via the ASC_JUDGE_MODEL env var. pydantic-ai
 # addresses Anthropic models with an "anthropic:" prefix (see its known-model
@@ -64,6 +72,7 @@ def judge_field(
     guidelines: Guidelines,
     dimensions: list[RubricDimension],
     model: Model | str | None = None,
+    cache: _VerdictCacheLike | None = None,
 ) -> list[RubricVerdict]:
     """Judge every (locale, dimension) pair and return the collected verdicts.
 
@@ -72,14 +81,22 @@ def judge_field(
     trusted to echo them), and ``guideline_ref`` is forced to None whenever the
     grounding text actually used for that call is empty/falsy (which covers both
     ``guidelines.available is False`` and available-but-empty guidelines).
+
+    ``cache`` is an OPTIONAL, duck-typed seam (anything with ``.get``/``.put``,
+    e.g. ``persistence.cache.VerdictCache``). When ``None`` (the default), the
+    agent runs exactly as before -- no cache lookups, no behavior change. When
+    provided, each (locale, dimension) prompt is hashed (together with the
+    resolved model name) into a cache key: a hit reuses the cached verdict
+    (still defensively re-stamped with the authoritative locale/dimension, and
+    with no model call), a miss runs the agent as usual and stores the result.
     """
     agent = build_judge(model)
+    model_name = str(agent.model) if cache is not None else None
     verdicts: list[RubricVerdict] = []
     for locale_meta in meta.locales:
         for dimension in dimensions:
             grounding = prompts.grounding_for_text(guidelines, dimension)
             prompt = prompts.build_text_prompt(dimension, locale_meta, grounding)
-            result = agent.run_sync(prompt)
 
             update: dict[str, object] = {
                 "locale": locale_meta.locale,
@@ -92,5 +109,19 @@ def judge_field(
             # must agree with layer 1 and scrub any ref regardless.
             if not grounding:
                 update["guideline_ref"] = None
+
+            if cache is not None:
+                key = verdict_cache_key(prompt, model_name)
+                cached = cache.get(key)
+                if cached is not None:
+                    verdicts.append(cached.model_copy(update=update))
+                    continue
+                result = agent.run_sync(prompt)
+                verdict = result.output.model_copy(update=update)
+                cache.put(key, verdict)
+                verdicts.append(verdict)
+                continue
+
+            result = agent.run_sync(prompt)
             verdicts.append(result.output.model_copy(update=update))
     return verdicts

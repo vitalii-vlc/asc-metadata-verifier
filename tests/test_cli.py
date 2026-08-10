@@ -217,11 +217,17 @@ class TestRunVerifyHelper:
         (tmp_path / "metadata" / "en-US").mkdir(parents=True)
         (tmp_path / "metadata" / "en-US" / "name.txt").write_text("App")
 
-        report, llm_skipped = cli.run_verify(path=tmp_path, dry_run=True)
+        outcome = cli.run_verify(path=tmp_path, dry_run=True)
 
-        assert llm_skipped is True
-        assert report.status in {"PASS", "WARN", "BLOCK"}
-        assert report.verdicts == []
+        assert outcome.llm_skipped is True
+        assert outcome.report.status in {"PASS", "WARN", "BLOCK"}
+        assert outcome.report.verdicts == []
+        # `VerifyOutcome` also threads out the ingested `meta` and the
+        # `Guidelines` actually used (unavailable, since `--dry-run` never
+        # fetches guidelines) -- Task 7's `history --app-id` fix depends on
+        # `meta` being available here rather than hidden inside `run_verify`.
+        assert outcome.meta.locales[0].app_name == "App"
+        assert outcome.guidelines.available is False
 
 
 class TestJuryPath:
@@ -348,3 +354,156 @@ class TestJuryPath:
 
         assert result.exit_code == 0, result.output
         assert "WARNING" not in result.output
+
+
+class TestPersistence:
+    """Task 7: the default-command group (bare `verify` keeps working with no
+    subcommand token) plus --db/--cache/--save wiring and the history/diff
+    subcommands.
+    """
+
+    def test_bare_verify_still_works_with_no_subcommand(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision"])  # NO 'verify' token
+
+        assert result.exit_code == 0, result.output
+
+    def test_db_saves_and_history_lists(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        db = f"sqlite:///{tmp_path / 'runs.db'}"
+        assert runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--db", db]).exit_code == 0
+
+        out = runner.invoke(cli.app, ["history", "--db", db])
+
+        assert out.exit_code == 0 and ("PASS" in out.output or "WARN" in out.output)
+
+    def test_diff_between_two_saved_runs(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-test-key")
+        monkeypatch.setattr(
+            cli,
+            "get_guidelines",
+            lambda **_kwargs: Guidelines(
+                available=True, text="2.3", sections={"2.3": "2.3"}, source="test"
+            ),
+        )
+        db = f"sqlite:///{tmp_path / 'runs.db'}"
+
+        # First run: a canned fail verdict -> BLOCK.
+        monkeypatch.setattr(cli, "judge_field", lambda *_a, **_k: [_fail_verdict()])
+        r1 = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--db", db])
+        assert r1.exit_code == 1, r1.output
+
+        # Second run: no findings -> PASS. The planted fail is now "resolved".
+        monkeypatch.setattr(cli, "judge_field", lambda *_a, **_k: [])
+        r2 = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--db", db])
+        assert r2.exit_code == 0, r2.output
+
+        hist = runner.invoke(cli.app, ["history", "--db", db, "--format", "json"])
+        assert hist.exit_code == 0, hist.output
+        runs = json.loads(hist.output)
+        assert len(runs) == 2
+        # `history` lists newest first: runs[0] is the second (PASS) run,
+        # runs[1] is the first (BLOCK) run.
+        newer_id, older_id = runs[0]["run_id"], runs[1]["run_id"]
+
+        diff_result = runner.invoke(cli.app, ["diff", older_id, newer_id, "--db", db])
+
+        assert diff_result.exit_code == 0, diff_result.output
+        assert "# Run diff: BLOCK ->" in diff_result.output
+        assert "## Resolved (1)" in diff_result.output
+        assert "placeholder_text" in diff_result.output
+
+    def test_bad_db_scheme_exits_2_no_traceback(self):
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--db", "mysql://h/d", "--dry-run"])
+
+        assert result.exit_code == 2 and "Traceback" not in result.output
+
+    def test_saved_run_has_real_app_id_and_history_filters_by_it(self, tmp_path, monkeypatch):
+        """Fix round 1, Important #2: `RunRecord.app_id` must be the actual
+        ingested app id (not None), and `history --app-id` must filter on it.
+        Uses `tests/fixtures/metadata.yaml`, whose app_id is "123456789"
+        (see `tests/test_ingest_yaml.py`).
+        """
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        db = f"sqlite:///{tmp_path / 'runs.db'}"
+        yaml_fixture = "tests/fixtures/metadata.yaml"
+
+        result = runner.invoke(
+            cli.app, ["verify", "--yaml", yaml_fixture, "--no-vision", "--db", db]
+        )
+        assert result.exit_code in {0, 1}, result.output
+
+        matched = runner.invoke(
+            cli.app, ["history", "--db", db, "--app-id", "123456789", "--format", "json"]
+        )
+        assert matched.exit_code == 0, matched.output
+        matched_runs = json.loads(matched.output)
+        assert len(matched_runs) == 1
+        assert matched_runs[0]["app_id"] == "123456789"
+
+        unmatched = runner.invoke(
+            cli.app, ["history", "--db", db, "--app-id", "no-such-app-id", "--format", "json"]
+        )
+        assert unmatched.exit_code == 0, unmatched.output
+        assert json.loads(unmatched.output) == []
+
+    def test_save_failure_warns_but_keeps_report_and_gate_exit_code(self, monkeypatch):
+        """Honesty-contract test: report-first-then-save. A `save_run` failure
+        must never hide the already-printed report or change the exit code --
+        only a stderr WARNING is added.
+        """
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-test-key")
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+        monkeypatch.setattr(cli, "judge_field", lambda *_a, **_k: [_fail_verdict()])
+
+        class _BoomRepo:
+            def save_run(self, record):
+                raise RuntimeError("disk full")
+
+        monkeypatch.setattr(cli, "resolve_repository", lambda _db: _BoomRepo())
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--db", "sqlite:///unused"])
+
+        # (a) the report was still printed...
+        assert "BLOCK" in result.output
+        # (b) ...and the exit code is still the gate's own code (unchanged by
+        # the persistence failure)...
+        assert result.exit_code == 1, result.output
+        # (c) ...with a WARNING about the save failure, not a hidden/silent one.
+        assert "WARNING: failed to persist run" in result.output
+        assert "Traceback" not in result.output
+
+
+class TestSimilar:
+    """Task 9: the `similar` subcommand. This codebase ships no default
+    semantic index/embedder wiring, so with nothing monkeypatched onto the
+    `cli._semantic_index` seam, `similar` must fail cleanly (exit 2, no
+    traceback) rather than crash trying to use a semantic index that was
+    never configured.
+    """
+
+    def test_similar_without_config_errors_cleanly(self):
+        result = runner.invoke(cli.app, ["similar", "lorem ipsum"])
+
+        assert result.exit_code == 2 and "Traceback" not in result.output
+        assert "semantic recall not configured" in result.output.lower()
+
+    def test_similar_with_configured_index_returns_hits(self, monkeypatch):
+        class _FakeIndex:
+            def query(self, text, k):
+                assert text == "lorem ipsum"
+                assert k == 3
+                return [{"run_id": "r1"}]
+
+        monkeypatch.setattr(cli, "_semantic_index", _FakeIndex())
+
+        result = runner.invoke(cli.app, ["similar", "lorem ipsum", "-k", "3"])
+
+        assert result.exit_code == 0, result.output
+        assert "r1" in result.output

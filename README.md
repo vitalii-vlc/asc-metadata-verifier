@@ -180,6 +180,43 @@ Panel output — every judge's vote plus the consensus — appears in both repor
 
 > **Honest status:** the default (no `--judges`) is unchanged single-Claude v1. The aggregation logic is validated offline with synthetic judges (`tests/test_jury_eval.py`). A live 3-judge Claude panel (haiku-4.5 + sonnet-5 + opus-4.8) has now been run over the full 44-case golden set — all 1,056 grid cells voted (0 errored). Headline: best single judge **95.5% (42/44)**; the `unanimous` policy reaches **100% (44/44)** — a genuine but modest **+2-case** lift — while `most_severe` is worse (−7 cases) and `majority`/`confidence_weighted` tie. Inter-judge Fleiss κ is high on objective categories (trademark 0.91, price 0.84) and low on subjective ones (placeholder 0.22). Small N; grounding-free; `confidence_weighted` is degenerate on the offline-scored path. Full breakdown + caveats in [`BUILD_LOG.md`](BUILD_LOG.md).
 
+## Persistence (optional)
+
+By default `asc-verify` prints a report and exits — nothing is written to disk. Pass `--db` to opt into a small persistence layer: saved run history, an optional judge-verdict cache, and cross-run diffing.
+
+```bash
+asc-verify ./fastlane --db sqlite:///runs.db          # verify and save this run
+asc-verify ./fastlane --db runs.db                    # a bare path works too, no scheme needed
+asc-verify ./fastlane --db runs.db --cache            # also reuse/store single-judge verdicts
+asc-verify ./fastlane --db runs.db --no-save          # cache reads/writes still happen, this run just isn't saved
+
+asc-verify history --db runs.db                                    # list saved runs, newest first
+asc-verify history --db runs.db --app-id 123456789 --format json
+asc-verify diff <run-id-a> <run-id-b> --db runs.db                 # new / resolved / persisting / severity-changed findings
+asc-verify similar "some finding text" -k 5                        # semantic recall — see below, requires setup
+```
+
+| Flag | Meaning |
+|---|---|
+| `--db <url-or-path>` | Enables persistence. Accepts a URL (`sqlite:///runs.db`) or a bare filesystem path (`runs.db`) — a bare path is dispatched to the sqlite backend directly. Omit it and nothing changes: `asc-verify` behaves exactly as documented earlier in this README. |
+| `--cache` / `--no-cache` | Reuse/store single-judge text verdicts in `--db`, keyed by prompt + model (see below). Default off; no effect without `--db`. Not applied to the multi-LLM jury path (`--judges`/`--judge`) — jury-path caching is out of scope for this version. |
+| `--no-save` | Skip saving this run's report to `--db` (a `--cache` read/write, if enabled, still happens). |
+
+`history [--app-id] [--limit] [--format {md,json}]` and `diff <run-a> <run-b> [--format {md,json}]` both require `--db` and read from it; `history` lists saved runs (newest first, optionally filtered to one `app_id`), `diff` compares two saved runs' findings. `asc-verify <path>` with no subcommand still works exactly as before — `verify` is the default command whenever the first token isn't a recognized subcommand name.
+
+**Repository pattern.** Persistence goes through a `Repository` protocol (`persistence/repository.py`) — `save_run` / `get_run` / `list_runs` plus the verdict-cache and guideline-snapshot methods. The only backend this codebase ships is `SqliteRepository`, built on the Python standard library's `sqlite3` (no ORM, no new runtime dependency). `--db` values are dispatched by URL scheme through a small registry (`persistence/config.py`'s `BACKENDS` dict, currently `{"sqlite": ...}`), so a future backend can register itself by scheme without touching the CLI.
+
+**Verdict cache.** `--cache` keys each single-judge text verdict on a hash of the resolved model name, the full built prompt (which already encodes the rubric dimension, the locale text, and the grounding actually used), and `PROMPT_VERSION` — a hash of the judge's system prompt. A cache **hit is only ever the identical prior computation**: changing the model, the prompt content, or the system prompt itself changes the key and forces a fresh judge call. It never rewrites, reinterprets, or otherwise alters a verdict.
+
+**Semantic recall (`similar`) — opt-in, bring-your-own embedder.** `asc-verify similar "<text>"` is meant to look up past findings by meaning rather than exact text, via a `SemanticIndex` protocol (`persistence/semantic.py`). This codebase ships:
+- `Embedder` / `SemanticIndex` protocols,
+- `StubEmbedder` + `InMemoryIndex` — a deterministic, offline, dependency-free bag-of-tokens embedder and index used for tests and local dev; it has no notion of meaning and is not a real embedding model,
+- `ChromaIndex` — a `SemanticIndex` backed by `chromadb`, gated behind the optional `semantic` extra (`uv add "asc-metadata-verifier[semantic]"`) and imported lazily inside `ChromaIndex.__init__`, so installing the base package never pulls in `chromadb`.
+
+There is **no bundled/default embedding model.** `ChromaIndex` always takes an injected `Embedder`; this codebase provides no real one, and wiring a real embedder (and assigning it to the CLI's semantic-index seam) is left entirely to the caller. With nothing configured, `similar` exits with an actionable error instead of a traceback.
+
+> **Honest status.** With no `--db`, `asc-verify` is unchanged from every example earlier in this README: byte-identical output, fully offline, zero new dependencies. The verdict cache never alters a verdict — a hit is always a literal replay of an earlier, identical computation. `ChromaIndex` plus a real embedder has **not** been exercised in CI: `chromadb` is an optional extra CI does not install, and its one test (`tests/test_semantic.py::test_chroma_index_gated_behind_dependency`) uses `pytest.importorskip("chromadb")` and skips cleanly rather than running — only `StubEmbedder`/`InMemoryIndex` are genuinely exercised. Semantic recall has no default wiring in this codebase at all: using it for real requires the caller to supply both an embedder and an index.
+
 ## The eval-science backbone
 
 The judge is **measured, not asserted.** A curated golden dataset of **44 labeled cases** with **multi-label ground truth** (`src/asc_metadata_verifier/evals/golden/cases.jsonl` — 30 positives across all 8 rubric dimensions + 14 clean controls engineered to stress false positives) runs through a **pydantic-evals** meta-eval (`src/asc_metadata_verifier/evals/meta_eval.py`) that computes per-dimension precision/recall and overall accuracy over a full 44×8 one-vs-rest grid, plus a failure taxonomy (`false_negative` / `false_positive` / `wrong_dimension` / `wrong_severity`). Multi-label ground truth means a case that legitimately trips two dimensions (e.g. a keyword list that both stuffs keywords *and* names a competitor's trademark) isn't scored as a judge false positive. `BUILD_LOG.md` records the pre-registered methodology and the honest status of the real-model run (not yet executed — no key in the dev environment; no numbers fabricated).
@@ -192,7 +229,8 @@ The package ships an `app-store-review-gate` skill (`src/asc_metadata_verifier/.
 
 ```bash
 uv sync
-uv run pytest          # 183 passed, 3 skipped (the skips are real-model tests, gated behind ANTHROPIC_API_KEY)
+uv run pytest          # 282 passed, 4 skipped (3 are real-model tests gated behind ANTHROPIC_API_KEY; 1 is the
+                        # ChromaIndex test, skipped when the optional `semantic` extra isn't installed)
 uv run ruff check .
 ```
 

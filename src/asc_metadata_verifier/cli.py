@@ -18,13 +18,18 @@ tests avoid a real network call to the live guidelines source.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import uuid
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
+import click
 import typer
+from typer.core import TyperGroup
 
 from asc_metadata_verifier.checks.deterministic import run_deterministic
 from asc_metadata_verifier.gate import evaluate
@@ -46,6 +51,12 @@ from asc_metadata_verifier.judge.panel import build_panel
 from asc_metadata_verifier.judge.rubric import DIMENSIONS
 from asc_metadata_verifier.judge.vision import VISION_DIMENSIONS, judge_screenshots
 from asc_metadata_verifier.observability import configure_logfire, span
+from asc_metadata_verifier.persistence.cache import VerdictCache, snapshot_hash
+from asc_metadata_verifier.persistence.config import resolve_repository
+from asc_metadata_verifier.persistence.diff import diff_runs, render_diff_json, render_diff_markdown
+from asc_metadata_verifier.persistence.models import RunRecord
+from asc_metadata_verifier.persistence.repository import RepositoryError
+from asc_metadata_verifier.persistence.semantic import SemanticIndex
 from asc_metadata_verifier.report import (
     compute_degradation,
     exit_code,
@@ -56,9 +67,62 @@ from asc_metadata_verifier.report import (
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
-    from asc_metadata_verifier.models import GateReport, PanelVerdict
+    from asc_metadata_verifier.models import AppMetadata, GateReport, PanelVerdict
+    from asc_metadata_verifier.persistence.repository import Repository
 
-app = typer.Typer(add_completion=False, no_args_is_help=False)
+
+class DefaultCommandGroup(TyperGroup):
+    """A `TyperGroup` that routes a bare invocation to `default_command`.
+
+    Adding `history`/`diff` as real subcommands alongside `verify` would
+    normally force every invocation to start with a command name (typer
+    builds a multi-command click Group as soon as there is more than one
+    `@app.command()`). This subclass restores the old single-command
+    ergonomics -- `asc-verify <path>` keeps working with no `verify` token --
+    by prepending `default_command` to the arg list whenever the first token
+    isn't a known subcommand name and isn't `--help`.
+
+    Modeled on click's own default-command-group recipe, but subclassing
+    `TyperGroup` rather than `click.Group`: typer 0.27.1 doesn't build a
+    `click.Group` at all -- `TyperGroup` reimplements group dispatch
+    (`parse_args`/`resolve_command`) directly on top of `click.Command`, and
+    `typer.Typer(cls=...)` requires a `TyperGroup` subclass. Verified
+    empirically against the installed typer 0.27.1 with a throwaway probe
+    before wiring this into the real app (see Task 7's report) -- both
+    `runner.invoke(app, [PATH, "--no-vision"])` (bare form) and
+    `runner.invoke(app, ["history", "--db", ...])` (subcommand form) dispatch
+    correctly with this class as `typer.Typer(cls=DefaultCommandGroup)`.
+    """
+
+    default_command = "verify"
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if not args or (args[0] not in self.commands and args[0] != "--help"):
+            args = [self.default_command, *args]
+        return super().parse_args(ctx, args)
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError:
+            return super().resolve_command(ctx, [self.default_command, *args])
+
+
+app = typer.Typer(add_completion=False, no_args_is_help=False, cls=DefaultCommandGroup)
+
+# Task 9: seam for a configured semantic index (a `SemanticIndex`, e.g. a
+# `ChromaIndex` wired to a real embedder). This codebase ships NO default
+# wiring here -- constructing and assigning a real index is left entirely to
+# the caller/deployment (it would need the optional `semantic` extra and an
+# embedder choice this codebase can't make on its behalf). `similar` reads
+# this module attribute at call time (not a function-default parameter)
+# specifically so tests can configure it via
+# `monkeypatch.setattr(cli, "_semantic_index", fake_index)`; left at its
+# default of `None`, `similar` fails with a clean, actionable error instead
+# of a traceback.
+_semantic_index: SemanticIndex | None = None
 
 
 class OutputFormat(StrEnum):
@@ -109,6 +173,29 @@ def _build_judge_set(
     return JudgeSet(specs=specs, consensus=consensus)
 
 
+class VerifyOutcome(NamedTuple):
+    """`run_verify`'s return value: `report`/`llm_skipped` (the original two
+    fields) plus `meta` (the ingested `AppMetadata`) and `guidelines` (the
+    `Guidelines` actually used to produce `report`, or the unavailable
+    placeholder in `--dry-run`), threaded out so a caller like `verify` can
+    persist them (`RunRecord.app_id`/`.primary_locale`, a guideline snapshot)
+    without re-ingesting or re-fetching -- guaranteeing what gets persisted is
+    exactly what `report` was graded against.
+
+    This widens `run_verify`'s return arity from the original `(report,
+    llm_skipped)` 2-tuple to 4 fields, so `report, llm_skipped =
+    cli.run_verify(...)` (a 2-value unpack) no longer works -- callers that
+    only want those two either unpack all four (`report, llm_skipped, meta,
+    guidelines = ...`) or use the named fields (`outcome.report`,
+    `outcome.llm_skipped`).
+    """
+
+    report: GateReport
+    llm_skipped: bool
+    meta: AppMetadata
+    guidelines: Guidelines
+
+
 def run_verify(
     *,
     path: str | Path | None = None,
@@ -126,8 +213,10 @@ def run_verify(
     judge_cli: list[str] | None = None,
     consensus: str | None = None,
     max_concurrency: int = 8,
-) -> tuple[GateReport, bool]:
-    """Run the full verification pipeline; return `(report, llm_skipped)`.
+    cache: VerdictCache | None = None,
+) -> VerifyOutcome:
+    """Run the full verification pipeline; return a `VerifyOutcome`
+    (unpacks as `report, llm_skipped, meta, guidelines`).
 
     Adapter selection precedence:
       1. All four `--asc-api-*` values given -> `AscApiAdapter` (live App
@@ -162,6 +251,16 @@ def run_verify(
     the no-key v1 path. Otherwise the panel's per-unit consensus verdicts
     populate `verdicts` (for the gate) and the full per-judge panel votes are
     returned in the report's `panels` for the report to render.
+
+    `cache`, when given, is threaded into `judge_field`'s single-judge text
+    path only (jury-path caching is out of scope for Task 7). `judge_field`
+    treats `cache=None` (the default -- e.g. every pre-existing caller/test
+    that doesn't pass it) exactly as before: no cache lookups, no behavior
+    change. The `cache` kwarg is only added to the `judge_field` call when it
+    is not `None`, specifically so monkeypatched fakes with a narrower
+    signature (e.g. `tests/test_e2e.py`'s `_fake_judge(meta, guidelines,
+    dimensions, model=None)`, which has no `cache` parameter) keep working
+    unchanged.
     """
     jury_requested = bool(judges_path or judge_cli)
     if consensus is not None and not jury_requested:
@@ -242,7 +341,10 @@ def run_verify(
 
                 if has_key_or_model:
                     with span("judge"):
-                        verdicts = judge_field(meta, guidelines, DIMENSIONS, model=judge_model)
+                        judge_kwargs: dict[str, object] = {"model": judge_model}
+                        if cache is not None:
+                            judge_kwargs["cache"] = cache
+                        verdicts = judge_field(meta, guidelines, DIMENSIONS, **judge_kwargs)
                     llm_skipped = False
 
                 if not no_vision and has_key_or_model and meta.screenshots:
@@ -260,7 +362,96 @@ def run_verify(
                 panels=panels,
             )
 
-        return report, llm_skipped
+        return VerifyOutcome(
+            report=report, llm_skipped=llm_skipped, meta=meta, guidelines=guidelines
+        )
+
+
+def _run_source(*, asc_api_app_id: str | None, yaml_path: str | Path | None) -> str:
+    """Best-effort label for `RunRecord.source`, mirroring `run_verify`'s adapter
+    precedence (ASC API > YAML > fastlane). Only meaningful to call after
+    `run_verify` has already succeeded with the same arguments -- it doesn't
+    itself validate the partial-ASC-API-credentials case (`run_verify` would
+    already have raised `typer.BadParameter` for that).
+    """
+    if asc_api_app_id is not None:
+        return "asc_api"
+    if yaml_path is not None:
+        return "yaml"
+    return "fastlane"
+
+
+def _config_fingerprint(
+    *,
+    fail_on: str,
+    judges_path: str | Path | None,
+    judge_cli: list[str] | None,
+    consensus: str | None,
+) -> str:
+    """Stable hash of the judge-relevant CLI config (fail_on, jury spec,
+    consensus policy) so two `RunRecord`s can be recognized as "same config"
+    (or not) later, e.g. when interpreting a `diff`.
+    """
+    payload = "\x00".join(
+        [
+            fail_on,
+            str(judges_path) if judges_path is not None else "",
+            ",".join(judge_cli) if judge_cli else "",
+            consensus or "",
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _persist_run(
+    *,
+    repo: Repository,
+    report: GateReport,
+    meta: AppMetadata,
+    guidelines: Guidelines,
+    fail_on: str,
+    judges_path: str | Path | None,
+    judge_cli: list[str] | None,
+    consensus: str | None,
+    source: str,
+) -> None:
+    """Snapshot the guideline text actually used for this run (when
+    available) and `save_run`.
+
+    `guidelines`/`meta` are the SAME objects `run_verify` used to produce
+    `report` (threaded out via `VerifyOutcome`, not re-fetched/re-ingested)
+    -- so the persisted snapshot can never mismatch what the verdicts were
+    actually graded against, and there is no second network round-trip.
+    `guidelines.available` is always `False` in `--dry-run` (`run_verify`
+    never fetches guidelines there), so `guideline_snapshot_hash` naturally
+    stays `None` and no network call is ever made just to persist a
+    `--dry-run --db ...` run.
+
+    Any exception raised here (a `RepositoryError`, or anything else) is left
+    to propagate -- the caller (`verify`) is responsible for catching it and
+    turning it into a stderr warning without touching the exit code, per the
+    report-first-then-save contract.
+    """
+    guideline_snapshot_hash = None
+    if guidelines.available and guidelines.text:
+        guideline_snapshot_hash = snapshot_hash(guidelines.text)
+        repo.put_guideline_snapshot(guideline_snapshot_hash, guidelines.text)
+
+    record = RunRecord(
+        run_id=uuid.uuid4().hex[:12],
+        created_at=datetime.now(UTC).isoformat(),
+        app_id=meta.app_id,
+        version=None,  # not in `AppMetadata` today -- a future ASC-API-sourced adapter may add it
+        primary_locale=meta.primary_locale,
+        source=source,
+        config_fingerprint=_config_fingerprint(
+            fail_on=fail_on, judges_path=judges_path, judge_cli=judge_cli, consensus=consensus
+        ),
+        gate_status=report.status,
+        report=report,
+        guideline_snapshot_hash=guideline_snapshot_hash,
+    )
+    repo.save_run(record)
 
 
 @app.command()
@@ -335,10 +526,38 @@ def verify(
     max_concurrency: int = typer.Option(
         8, "--max-concurrency", help="Max concurrent jury judge calls in flight at once."
     ),
+    db: str | None = typer.Option(
+        None,
+        "--db",
+        help="Persistence store URL or path (e.g. 'sqlite:///runs.db', or a bare file "
+        "path). Enables --cache and this run's --save (on by default once --db is given).",
+    ),
+    cache: bool = typer.Option(
+        False,
+        "--cache/--no-cache",
+        help="Reuse/store single-judge verdicts in --db, keyed by prompt+model "
+        "(the jury path is not cached). No effect without --db.",
+    ),
+    no_save: bool = typer.Option(
+        False,
+        "--no-save",
+        help="Do not persist this run's report to --db (a --cache read/write, if "
+        "enabled, still happens).",
+    ),
 ) -> None:
     """Verify App Store Connect metadata against deterministic checks and an LLM judge."""
+    repo: Repository | None = None
+    if db is not None:
+        try:
+            repo = resolve_repository(db)
+        except RepositoryError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2) from None
+
+    verdict_cache = VerdictCache(repo) if (repo is not None and cache) else None
+
     try:
-        report, llm_skipped = run_verify(
+        report, llm_skipped, meta, guidelines = run_verify(
             path=path,
             yaml_path=yaml_path,
             asc_api_app_id=asc_api_app_id,
@@ -353,6 +572,7 @@ def verify(
             judge_cli=judge_cli,
             consensus=consensus,
             max_concurrency=max_concurrency,
+            cache=verdict_cache,
         )
     except IngestError as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -395,4 +615,144 @@ def verify(
             err=True,
         )
 
+    # Report + exit code are fully decided above this point. Persistence is
+    # best-effort from here on: any failure becomes a stderr WARNING, never a
+    # change to the exit code and never a reason to hide the gate result
+    # already printed.
+    if repo is not None and not no_save:
+        try:
+            _persist_run(
+                repo=repo,
+                report=report,
+                meta=meta,
+                guidelines=guidelines,
+                fail_on=fail_on.value,
+                judges_path=judges_path,
+                judge_cli=judge_cli,
+                consensus=consensus,
+                source=_run_source(asc_api_app_id=asc_api_app_id, yaml_path=yaml_path),
+            )
+        except Exception as exc:  # deliberately broad -- persistence must never hide the gate
+            typer.echo(f"WARNING: failed to persist run: {exc}", err=True)
+
     raise typer.Exit(code=exit_code(report))
+
+
+_HISTORY_ROW_FORMAT = "{run_id:<14}  {created_at:<32}  {gate_status:<7}  {source:<10}  {app_id}"
+
+
+@app.command()
+def history(
+    db: str | None = typer.Option(None, "--db", help="Persistence store URL/path to read from."),
+    app_id: str | None = typer.Option(None, "--app-id", help="Filter to one app id."),
+    limit: int = typer.Option(50, "--limit", help="Max number of runs to show (newest first)."),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.md, "--format", help="Output format: 'md' (a plain table) or 'json'."
+    ),
+) -> None:
+    """List past `verify` runs saved to --db, newest first."""
+    if not db:
+        typer.echo("Error: --db is required for `history`.", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        repo = resolve_repository(db)
+        runs = [] if repo is None else repo.list_runs(app_id=app_id, limit=limit)
+    except RepositoryError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    if output_format is OutputFormat.json:
+        typer.echo(json.dumps([run.model_dump() for run in runs], indent=2))
+        return
+
+    if not runs:
+        typer.echo("No runs found.")
+        return
+
+    typer.echo(
+        _HISTORY_ROW_FORMAT.format(
+            run_id="RUN ID",
+            created_at="CREATED AT",
+            gate_status="STATUS",
+            source="SOURCE",
+            app_id="APP ID",
+        )
+    )
+    for run in runs:
+        typer.echo(
+            _HISTORY_ROW_FORMAT.format(
+                run_id=run.run_id,
+                created_at=run.created_at,
+                gate_status=run.gate_status,
+                source=run.source,
+                app_id=run.app_id or "-",
+            )
+        )
+
+
+@app.command()
+def diff(
+    run_a: str = typer.Argument(..., help="Baseline run id (as printed by `history`)."),
+    run_b: str = typer.Argument(..., help="Comparison run id (as printed by `history`)."),
+    db: str | None = typer.Option(None, "--db", help="Persistence store URL/path to read from."),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.md, "--format", help="Output format: 'md' or 'json'."
+    ),
+) -> None:
+    """Diff two saved runs' findings: new / resolved / persisting / severity-changed."""
+    if not db:
+        typer.echo("Error: --db is required for `diff`.", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        repo = resolve_repository(db)
+        record_a = None if repo is None else repo.get_run(run_a)
+        record_b = None if repo is None else repo.get_run(run_b)
+    except RepositoryError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    missing = [rid for rid, rec in ((run_a, record_a), (run_b, record_b)) if rec is None]
+    if missing:
+        typer.echo(f"Error: run id(s) not found: {', '.join(missing)}", err=True)
+        raise typer.Exit(code=2)
+
+    result = diff_runs(record_a, record_b)
+    if output_format is OutputFormat.json:
+        typer.echo(render_diff_json(result))
+    else:
+        typer.echo(render_diff_markdown(result))
+
+
+@app.command()
+def similar(
+    text: str = typer.Argument(..., help="Query text to find semantically similar hits for."),
+    db: str | None = typer.Option(
+        None,
+        "--db",
+        help="Reserved for a semantic index backend location. This codebase ships no "
+        "default embedder/index wiring -- configure `cli._semantic_index` (e.g. a "
+        "`ChromaIndex`, from the 'semantic' extra) to use this command.",
+    ),
+    k: int = typer.Option(5, "-k", help="Number of nearest neighbors to return."),
+) -> None:
+    """Find past findings semantically similar to TEXT.
+
+    Requires a configured semantic index (see the `semantic` extra and the
+    `ChromaIndex`/`Embedder` protocols in `persistence.semantic`) -- this
+    codebase ships no default one, so with nothing configured this exits 2
+    with an actionable message rather than a traceback.
+    """
+    del db  # reserved seam -- not wired to a default backend, see docstring/help above
+
+    if _semantic_index is None:
+        typer.echo(
+            "Error: semantic recall not configured (install the 'semantic' extra "
+            "and configure an embedder)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    hits = _semantic_index.query(text, k=k)
+    typer.echo(json.dumps(hits, indent=2))

@@ -292,6 +292,81 @@ def test_build_judge_respects_asc_judge_model_env(monkeypatch):
     assert "claude-opus-4-8" in str(agent.model)
 
 
+class DictCache:
+    """Minimal dict-backed fake satisfying the duck-typed cache seam (.get/.put)."""
+
+    def __init__(self):
+        self.d = {}
+
+    def get(self, k):
+        return self.d.get(k)
+
+    def put(self, k, v):
+        self.d[k] = v
+
+
+def test_cache_hit_skips_the_model_call():
+    calls = {"n": 0}
+
+    def factory(_t):
+        calls["n"] += 1
+        return RubricVerdict(
+            dimension="x",
+            verdict="fail",
+            severity="high",
+            confidence=0.9,
+            rationale="r",
+            offending_quote="q",
+            locale="x",
+            field="description",
+        )
+
+    meta = AppMetadata(locales=[LocaleMetadata(locale="en-US", description="Lorem ipsum")])
+    g = Guidelines(available=True, text="2.3", sections={"2.3": "2.3"}, source="t")
+    cache = DictCache()
+    model = _model(factory)
+    v1 = judge_field(meta, g, [_dim("placeholder_text")], model=model, cache=cache)
+    v2 = judge_field(meta, g, [_dim("placeholder_text")], model=model, cache=cache)
+    assert calls["n"] == 1  # second run served from cache
+    assert v1[0].verdict == v2[0].verdict == "fail"
+    assert v2[0].locale == "en-US" and v2[0].dimension == "placeholder_text"
+
+
+def test_cache_miss_when_grounding_changes():
+    calls = {"n": 0}
+
+    def factory(_t):
+        calls["n"] += 1
+        return RubricVerdict(
+            dimension="x",
+            verdict="pass",
+            severity="low",
+            confidence=0.5,
+            rationale="r",
+            locale="x",
+            field="description",
+        )
+
+    meta = AppMetadata(locales=[LocaleMetadata(locale="en-US", description="x")])
+    cache = DictCache()
+    model = _model(factory)
+    judge_field(
+        meta,
+        Guidelines(available=True, text="A", sections={"2.3": "A"}, source="t"),
+        [_dim("placeholder_text")],
+        model=model,
+        cache=cache,
+    )
+    judge_field(
+        meta,
+        Guidelines(available=True, text="B", sections={"2.3": "B"}, source="t"),
+        [_dim("placeholder_text")],
+        model=model,
+        cache=cache,
+    )
+    assert calls["n"] == 2  # different grounding -> different prompt -> miss
+
+
 @pytest.mark.skipif(
     not os.environ.get("ANTHROPIC_API_KEY"),
     reason="requires ANTHROPIC_API_KEY; skipped in offline runs",

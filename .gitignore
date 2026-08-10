@@ -31,6 +31,9 @@ logfire_credentials.json
 # SDD scratch (ledger, briefs, review packages — git-ignored working space)
 .superpowers/
 
+# Default local persistence store for `--db` (sqlite runs/cache/snapshots) — never committed
+.asc-verify/
+
 # OS / editor
 .DS_Store
 .idea/

@@ -22,3 +22,10 @@ def test_prompt_version_is_nonempty_and_folds_in():
 def test_snapshot_hash_is_content_addressed():
     assert snapshot_hash("2.3 body") == snapshot_hash("2.3 body")
     assert snapshot_hash("x") != snapshot_hash("y")
+
+
+def test_key_depends_on_prompt_version(monkeypatch):
+    import asc_metadata_verifier.persistence.cache as cache
+    base = cache.verdict_cache_key("p", "m")
+    monkeypatch.setattr(cache, "PROMPT_VERSION", "a-different-version")
+    assert cache.verdict_cache_key("p", "m") != base

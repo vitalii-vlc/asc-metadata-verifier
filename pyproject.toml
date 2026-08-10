@@ -20,6 +20,13 @@ dependencies = [
     "typer>=0.27.1",
 ]
 
+[project.optional-dependencies]
+# Optional, offline-by-default semantic recall backend. Never a core
+# dependency: `persistence/semantic.py` only imports `chromadb` lazily
+# (inside `ChromaIndex.__init__`), so the default install and its tests
+# never need this extra, and CI never downloads it.
+semantic = ["chromadb>=0.5"]
+
 [project.scripts]
 asc-verify = "asc_metadata_verifier.cli:app"
 

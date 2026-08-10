@@ -15,3 +15,14 @@ def test_in_memory_index_returns_nearest():
     ])
     hits = idx.query("lorem ipsum placeholder", k=1)
     assert hits and hits[0]["run_id"] == "r1"
+
+
+def test_chroma_index_gated_behind_dependency():
+    import pytest
+
+    pytest.importorskip("chromadb")  # skips cleanly when chromadb isn't installed
+    from asc_metadata_verifier.persistence.semantic import ChromaIndex
+
+    idx = ChromaIndex(StubEmbedder(), path=None)  # in-memory chroma
+    idx.add([("lorem ipsum", {"run_id": "r1"})])
+    assert idx.query("lorem", k=1)[0]["run_id"] == "r1"

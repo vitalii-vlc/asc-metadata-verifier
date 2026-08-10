@@ -56,6 +56,7 @@ from asc_metadata_verifier.persistence.config import resolve_repository
 from asc_metadata_verifier.persistence.diff import diff_runs, render_diff_json, render_diff_markdown
 from asc_metadata_verifier.persistence.models import RunRecord
 from asc_metadata_verifier.persistence.repository import RepositoryError
+from asc_metadata_verifier.persistence.semantic import SemanticIndex
 from asc_metadata_verifier.report import (
     compute_degradation,
     exit_code,
@@ -110,6 +111,18 @@ class DefaultCommandGroup(TyperGroup):
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=False, cls=DefaultCommandGroup)
+
+# Task 9: seam for a configured semantic index (a `SemanticIndex`, e.g. a
+# `ChromaIndex` wired to a real embedder). This codebase ships NO default
+# wiring here -- constructing and assigning a real index is left entirely to
+# the caller/deployment (it would need the optional `semantic` extra and an
+# embedder choice this codebase can't make on its behalf). `similar` reads
+# this module attribute at call time (not a function-default parameter)
+# specifically so tests can configure it via
+# `monkeypatch.setattr(cli, "_semantic_index", fake_index)`; left at its
+# default of `None`, `similar` fails with a clean, actionable error instead
+# of a traceback.
+_semantic_index: SemanticIndex | None = None
 
 
 class OutputFormat(StrEnum):
@@ -710,3 +723,36 @@ def diff(
         typer.echo(render_diff_json(result))
     else:
         typer.echo(render_diff_markdown(result))
+
+
+@app.command()
+def similar(
+    text: str = typer.Argument(..., help="Query text to find semantically similar hits for."),
+    db: str | None = typer.Option(
+        None,
+        "--db",
+        help="Reserved for a semantic index backend location. This codebase ships no "
+        "default embedder/index wiring -- configure `cli._semantic_index` (e.g. a "
+        "`ChromaIndex`, from the 'semantic' extra) to use this command.",
+    ),
+    k: int = typer.Option(5, "-k", help="Number of nearest neighbors to return."),
+) -> None:
+    """Find past findings semantically similar to TEXT.
+
+    Requires a configured semantic index (see the `semantic` extra and the
+    `ChromaIndex`/`Embedder` protocols in `persistence.semantic`) -- this
+    codebase ships no default one, so with nothing configured this exits 2
+    with an actionable message rather than a traceback.
+    """
+    del db  # reserved seam -- not wired to a default backend, see docstring/help above
+
+    if _semantic_index is None:
+        typer.echo(
+            "Error: semantic recall not configured (install the 'semantic' extra "
+            "and configure an embedder)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    hits = _semantic_index.query(text, k=k)
+    typer.echo(json.dumps(hits, indent=2))

@@ -10,6 +10,7 @@ needing network access or a real embedding model.
 
 import hashlib
 import math
+import uuid
 from typing import Protocol
 
 _VECTOR_DIM = 64
@@ -104,3 +105,56 @@ class InMemoryIndex:
         ]
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [metadata for _, metadata in scored[:k]]
+
+
+class ChromaIndex:
+    """`SemanticIndex` backed by a (persistent or in-memory) chromadb collection.
+
+    `chromadb` is a large optional dependency (the `semantic` extra), so it
+    is imported lazily -- inside `__init__`, never at module top level. That
+    keeps `import asc_metadata_verifier.persistence.semantic` (and anything
+    that transitively imports this module, including the default/no-extra
+    CLI install) free of any chromadb import; only code that actually
+    constructs a `ChromaIndex` pays that cost, and it fails with a normal
+    `ModuleNotFoundError` at that point if the extra isn't installed.
+
+    Embeddings are always produced by the injected `embedder` and passed to
+    chromadb explicitly via `embeddings=`/`query_embeddings=`, never left for
+    chromadb's own default embedding function to compute -- so the embedding
+    model in use is always the one this codebase chose (e.g. `StubEmbedder`
+    for fully offline tests/dev), and chromadb never tries to lazily
+    download a default model.
+    """
+
+    _COLLECTION_NAME = "asc_metadata_verifier"
+
+    def __init__(self, embedder: Embedder, path: str | None = None) -> None:
+        import chromadb
+
+        self._embedder = embedder
+        self._client = (
+            chromadb.EphemeralClient() if path is None else chromadb.PersistentClient(path=path)
+        )
+        self._collection = self._client.get_or_create_collection(
+            name=self._COLLECTION_NAME, embedding_function=None
+        )
+
+    def add(self, items: list[tuple[str, dict]]) -> None:
+        if not items:
+            return
+        texts = [text for text, _ in items]
+        vectors = self._embedder.embed(texts)
+        self._collection.add(
+            ids=[uuid.uuid4().hex for _ in items],
+            embeddings=vectors,
+            metadatas=[metadata for _, metadata in items],
+            documents=texts,
+        )
+
+    def query(self, text: str, k: int) -> list[dict]:
+        if k <= 0 or self._collection.count() == 0:
+            return []
+        (query_vector,) = self._embedder.embed([text])
+        results = self._collection.query(query_embeddings=[query_vector], n_results=k)
+        metadatas = results.get("metadatas") or [[]]
+        return list(metadatas[0])

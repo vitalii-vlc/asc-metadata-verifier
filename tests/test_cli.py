@@ -478,3 +478,32 @@ class TestPersistence:
         # (c) ...with a WARNING about the save failure, not a hidden/silent one.
         assert "WARNING: failed to persist run" in result.output
         assert "Traceback" not in result.output
+
+
+class TestSimilar:
+    """Task 9: the `similar` subcommand. This codebase ships no default
+    semantic index/embedder wiring, so with nothing monkeypatched onto the
+    `cli._semantic_index` seam, `similar` must fail cleanly (exit 2, no
+    traceback) rather than crash trying to use a semantic index that was
+    never configured.
+    """
+
+    def test_similar_without_config_errors_cleanly(self):
+        result = runner.invoke(cli.app, ["similar", "lorem ipsum"])
+
+        assert result.exit_code == 2 and "Traceback" not in result.output
+        assert "semantic recall not configured" in result.output.lower()
+
+    def test_similar_with_configured_index_returns_hits(self, monkeypatch):
+        class _FakeIndex:
+            def query(self, text, k):
+                assert text == "lorem ipsum"
+                assert k == 3
+                return [{"run_id": "r1"}]
+
+        monkeypatch.setattr(cli, "_semantic_index", _FakeIndex())
+
+        result = runner.invoke(cli.app, ["similar", "lorem ipsum", "-k", "3"])
+
+        assert result.exit_code == 0, result.output
+        assert "r1" in result.output

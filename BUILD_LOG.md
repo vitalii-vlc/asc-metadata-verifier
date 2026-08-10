@@ -924,7 +924,7 @@ folds code findings into the unified PASS/WARN/BLOCK gate. Architecture:
 ### Verification
 
 Built task-by-task (TDD, 11 tasks) on `feat/code-analyzer`. Full suite with the
-`[code]` extra: `uv run pytest -q` → **332 passed, 4 skipped** (3 real-model
+`[code]` extra: `uv run pytest -q` → **333 passed, 4 skipped** (3 real-model
 `ANTHROPIC_API_KEY`-gated, 1 ChromaIndex gated behind `semantic`).
 `uv run ruff check .` → **All checks passed!** A live end-to-end run over a
 synthetic flawed project surfaced 6 findings across 5 categories with correct

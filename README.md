@@ -261,7 +261,7 @@ The package ships an `app-store-review-gate` skill (`src/asc_metadata_verifier/.
 
 ```bash
 uv sync --extra code   # `--extra code` adds the tree-sitter grammars the code analyzer needs
-uv run pytest          # 332 passed, 4 skipped with the [code] extra installed. The 4 skips: 3 real-model
+uv run pytest          # 333 passed, 4 skipped with the [code] extra installed. The 4 skips: 3 real-model
                         # tests gated behind ANTHROPIC_API_KEY, 1 ChromaIndex test gated behind the
                         # `semantic` extra. Without `--extra code`, the tree-sitter-backed code tests
                         # (parser + code CLI) additionally skip via pytest.importorskip.

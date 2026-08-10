@@ -723,3 +723,131 @@ measured against real models. Full suite: `uv run pytest -q` → **238 passed, 3
 skipped** (the 3 skips are the pre-existing `ANTHROPIC_API_KEY`-gated
 real-model tests, unrelated to the jury docs change). `uv run ruff check .` →
 **All checks passed!**
+
+## Persistence (sub-project B)
+
+Ten tasks (`docs/superpowers/plans/2026-08-10-persistence.md`), built the same
+subagent-driven way as the jury sub-project: an implementer sub-agent per
+task, then a separate reviewer sub-agent against the task's spec before it
+was marked complete (`.superpowers/sdd/2026-08-10-persistence/progress.md` is
+the ledger).
+
+### Design decisions
+
+- **Opt-in, zero-new-dependency default.** Persistence activates only when
+  `--db` is given. `SqliteRepository` (the only shipped `Repository`) uses
+  the standard library's `sqlite3` — no ORM, no new runtime dependency for
+  the default path. With no `--db`, `verify` is byte-for-byte the same
+  command it was before this sub-project: same output, same offline-by-default
+  behavior, same dependency set.
+- **Prompt-based verdict-cache key, `PROMPT_VERSION` = a hash of the system
+  prompt.** `persistence/cache.py::verdict_cache_key(prompt, model_name)`
+  hashes `(PROMPT_VERSION, model_name, prompt)`, where `PROMPT_VERSION` is a
+  sha256 of `judge/prompts.py::TEXT_SYSTEM_PROMPT`. The full built prompt
+  already encodes the rubric dimension, every locale text field, and the
+  grounding text actually used, so the key needs no separate fields for
+  those; folding the system prompt in as `PROMPT_VERSION` means an edit to
+  the judge's own instructions invalidates every cached verdict
+  automatically, rather than silently serving stale reasoning under a new
+  prompt. A cache hit is therefore, by construction, never anything other
+  than the literal, identical prior computation.
+- **`DefaultCommandGroup` (a `TyperGroup` subclass) for CLI backward
+  compatibility.** Adding `history`/`diff`/`similar` as real subcommands
+  alongside `verify` would normally force every invocation to name a
+  subcommand, once typer has more than one `@app.command()`. `cli.py`'s
+  `DefaultCommandGroup` overrides `parse_args`/`resolve_command` to prepend
+  `verify` whenever the first token isn't a known subcommand name, so
+  `asc-verify <path>` keeps working exactly as before. Task 7's report
+  documents that the brief's literal `class DefaultCommandGroup(click.Group)`
+  does not compose with the installed typer (0.27.1) — it never builds a
+  `click.Group` at all, `TyperGroup` reimplements group dispatch directly on
+  `click.Command` — so the implementer verified `TyperGroup` empirically
+  (reading its source, then a throwaway 3-command probe app) before wiring
+  the real subclass into `cli.py`.
+- **Report-first-then-save.** In `verify()`, the report is rendered to
+  stdout and the exit code is fully decided from `report` *before* the
+  persistence block runs. The whole `_persist_run(...)` call is wrapped in a
+  bare `except Exception`, which converts any persistence failure — a broken
+  DB, a locked file, anything else — into a `WARNING:` on stderr, never a
+  change to the exit code and never a reason to hide the already-printed
+  gate result.
+- **Semantic recall: bring-your-own embedder, no bundled model.**
+  `persistence/semantic.py` ships `Embedder`/`SemanticIndex` protocols, a
+  fully offline `StubEmbedder`/`InMemoryIndex` pair for tests and local dev,
+  and `ChromaIndex` (backed by the optional `chromadb` extra). `chromadb` is
+  imported lazily inside `ChromaIndex.__init__`, never at module top level,
+  so importing `persistence.semantic` — and everything that transitively
+  imports it, including the default no-extra CLI install — never pays that
+  cost. `ChromaIndex` always takes an injected `Embedder` and passes vectors
+  to chromadb explicitly (`embeddings=`/`query_embeddings=`), so it never
+  falls back to chromadb's own default embedding function; this codebase
+  deliberately ships no real embedding model of its own, only the protocol
+  and the offline stub.
+
+### Fix rounds
+
+Of 10 tasks, **2 required a fix round** (T2, T7); 8 passed review clean on
+the first pass.
+
+- **T2 (verdict-cache keys):** the first pass shipped `verdict_cache_key`
+  correctly reading `PROMPT_VERSION` from module scope, but no test actually
+  asserted the key changes when `PROMPT_VERSION` does — a regression that
+  dropped `PROMPT_VERSION` from the key would have gone undetected and
+  silently served stale-prompt verdicts as cache hits. Fix round added
+  `test_key_depends_on_prompt_version` (monkeypatches `PROMPT_VERSION` and
+  asserts the key changes), `e09eba3`.
+- **T7 (CLI wiring):** two Important findings. (1) An `Edit`-tool anchor
+  mistake during the original implementation orphaned a regression-guard
+  assertion (`assert "WARNING" not in result.output`) onto the wrong test,
+  silently gutting `test_healthy_jury_run_has_no_degraded_warning`'s only
+  WARNING-absence check — restored to the correct test. (2) More
+  substantively, `run_verify`'s return contract had stayed the pre-existing
+  `(report, llm_skipped)` 2-tuple, so `_persist_run` never had access to the
+  ingested `AppMetadata` or the `Guidelines` actually used: every persisted
+  `RunRecord.app_id`/`.primary_locale` came out `None` (making
+  `history --app-id` filtering inert), and `_persist_run` worked around the
+  missing `Guidelines` by re-fetching guidelines a second time — a real
+  double network fetch, and a risk that the persisted snapshot could
+  mismatch what the verdicts were actually graded against. The fix widened
+  `run_verify`'s return to a `VerifyOutcome` NamedTuple (`report,
+  llm_skipped, meta, guidelines`), threading the already-computed
+  `meta`/`guidelines` out instead of discarding or re-fetching them — so
+  `app_id`/`primary_locale` persist for real and the guideline snapshot can
+  never mismatch the graded verdicts. Commit `e82234e`.
+
+### Honest open items
+
+- **`ChromaIndex` + a real embedder is not exercised in CI (or in this dev
+  environment).** `chromadb` lives behind the optional `semantic` extra;
+  neither CI nor the environment this branch was built in has it installed.
+  `tests/test_semantic.py::test_chroma_index_gated_behind_dependency` uses
+  `pytest.importorskip("chromadb")` and skips cleanly rather than running —
+  confirmed directly: `uv run pytest -rs` reports
+  `SKIPPED [1] tests/test_semantic.py:23: could not import 'chromadb'`. Only
+  `StubEmbedder`/`InMemoryIndex` (a deterministic bag-of-tokens embedder with
+  no notion of meaning) are genuinely exercised; the real chromadb add/query
+  API surface has never actually run against a real embedding model.
+- **`RunRecord.version` is always `None`.** `AppMetadata` has no `version`
+  field today, so there is nothing for `run_verify`/`_persist_run` to
+  populate it from. The field and the sqlite column exist (for a future
+  ASC-API-sourced adapter that does carry a version), but every run
+  persisted by this codebase today has `version=None`.
+- **Jury-path caching is deferred.** `--cache` is threaded only into
+  `judge_field`'s single-judge text path — `run_verify`'s `cache` kwarg is
+  only ever applied on the non-jury branch. A `--judges`/`--judge` jury run
+  never reads or writes the verdict cache, regardless of `--cache`.
+
+### Task 10 — Documentation (this entry + README)
+
+README gained a "Persistence (optional)" section: the opt-in `--db` flag
+(URL or bare path), `--cache`/`--no-cache`, `--no-save`, `history` and
+`diff`, the repository-pattern note, the verdict-cache key description, and
+semantic recall's bring-your-own-embedder status — plus the same
+"Honest status" callout pattern used by the jury section above. The
+`Development` section's stale test count (`183 passed, 3 skipped`, left over
+from Phase 1) was corrected to the real current numbers while this file was
+already being touched for accuracy. Full suite: `uv run pytest -q` →
+**282 passed, 4 skipped** (3 are the pre-existing `ANTHROPIC_API_KEY`-gated
+real-model tests; 1 is `test_chroma_index_gated_behind_dependency`, skipped
+because `chromadb` isn't installed in this environment either — the same
+condition CI runs under). `uv run ruff check .` → **All checks passed!**

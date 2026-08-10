@@ -26,6 +26,10 @@ dependencies = [
 # (inside `ChromaIndex.__init__`), so the default install and its tests
 # never need this extra, and CI never downloads it.
 semantic = ["chromadb>=0.5"]
+# Optional, offline deep-code-analysis backend. Never a core dependency:
+# `code/backends/treesitter.py` imports tree-sitter lazily, so the default
+# install and its tests never need this extra, and `verify` is unchanged.
+code = ["tree-sitter>=0.23", "tree-sitter-language-pack>=0.20"]
 
 [project.scripts]
 asc-verify = "asc_metadata_verifier.cli:app"

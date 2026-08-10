@@ -1,11 +1,6 @@
 """Rule registry. Each cluster module exposes a `RULES: list[Rule]`; importing
 this package assembles the global `REGISTRY`. Rules are pure: given a
-`ProjectModel` + `ASTIndex`, return `CodeFinding`s and nothing else.
-
-Transitional guard: until the cluster modules (privacy/deprecated_api/security/
-compliance) land in Tasks 5-7, `_load_registry` swallows the ImportError and
-REGISTRY is empty. Task 7 removes the guard and a registry test asserts the
-full set."""
+`ProjectModel` + `ASTIndex`, return `CodeFinding`s and nothing else."""
 
 from __future__ import annotations
 
@@ -27,19 +22,16 @@ class Rule(Protocol):
 
 
 def _load_registry() -> list[Rule]:
-    registry: list[Rule] = []
-    try:
-        from asc_metadata_verifier.code.rules import (
-            compliance,
-            deprecated_api,
-            privacy,
-            security,
-        )
+    from asc_metadata_verifier.code.rules import (
+        compliance,
+        deprecated_api,
+        privacy,
+        security,
+    )
 
-        for module in (privacy, deprecated_api, security, compliance):
-            registry.extend(module.RULES)
-    except ImportError:
-        pass  # cluster modules land in Tasks 5-7; Task 7 removes this guard.
+    registry: list[Rule] = []
+    for module in (privacy, deprecated_api, security, compliance):
+        registry.extend(module.RULES)
     return registry
 
 

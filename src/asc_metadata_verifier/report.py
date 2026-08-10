@@ -8,6 +8,8 @@ return.
 from collections import Counter, defaultdict
 
 from asc_metadata_verifier.models import (
+    CodeFinding,
+    CodeReport,
     DeterministicFinding,
     GateReport,
     PanelVerdict,
@@ -135,6 +137,44 @@ def _render_findings(findings: list[DeterministicFinding]) -> list[str]:
     return lines
 
 
+def _render_code_findings(findings: list[CodeFinding]) -> list[str]:
+    """Render code findings grouped by category. Empty list -> no lines."""
+    if not findings:
+        return []
+    lines: list[str] = ["## Code findings", ""]
+    by_cat: dict[str, list[CodeFinding]] = defaultdict(list)
+    for f in findings:
+        by_cat[f.category].append(f)
+    for category in sorted(by_cat):
+        lines.append(f"### {category}")
+        for f in by_cat[category]:
+            anchor = f"{f.file}:{f.line}" if f.line is not None else f.file
+            tag = "jury" if f.source == "jury" else "static"
+            lines.append(f"- [{f.severity}] {f.rule_id} ({f.guideline_ref}) [{tag}] {anchor}")
+            lines.append(f"    {f.detail} — evidence: {f.evidence!r}")
+            if f.suggested_fix:
+                lines.append(f"    fix: {f.suggested_fix}")
+        lines.append("")
+    return lines
+
+
+def render_code_report_text(report: CodeReport) -> str:
+    """Render a standalone CodeReport as human-readable text."""
+    header = [
+        f"Code analysis: {report.status}",
+        f"({report.analyzed_files} files, backend={report.parser_backend}, "
+        f"jury={report.jury_used})",
+        "",
+    ]
+    body = _render_code_findings(report.findings) or ["No code findings."]
+    return "\n".join(header + body).rstrip() + "\n"
+
+
+def render_code_report_json(report: CodeReport) -> str:
+    """Serialize a CodeReport to JSON (round-trips via `CodeReport.model_validate_json`)."""
+    return report.model_dump_json(indent=2)
+
+
 def render_markdown(report: GateReport) -> str:
     """Render a GateReport as a human-readable markdown report.
 
@@ -167,6 +207,7 @@ def render_markdown(report: GateReport) -> str:
     lines.extend(_render_verdicts(report.verdicts))
     lines.extend(_render_panels(report.panels))
     lines.extend(_render_findings(report.deterministic_findings))
+    lines.extend(_render_code_findings(report.code_findings))
 
     return "\n".join(lines).rstrip() + "\n"
 

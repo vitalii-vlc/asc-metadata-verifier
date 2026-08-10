@@ -347,4 +347,71 @@ class TestJuryPath:
                                          str(self._judges_file(tmp_path))])
 
         assert result.exit_code == 0, result.output
+
+
+class TestPersistence:
+    """Task 7: the default-command group (bare `verify` keeps working with no
+    subcommand token) plus --db/--cache/--save wiring and the history/diff
+    subcommands.
+    """
+
+    def test_bare_verify_still_works_with_no_subcommand(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision"])  # NO 'verify' token
+
+        assert result.exit_code == 0, result.output
+
+    def test_db_saves_and_history_lists(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(cli, "get_guidelines", _unavailable_guidelines)
+
+        db = f"sqlite:///{tmp_path / 'runs.db'}"
+        assert runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--db", db]).exit_code == 0
+
+        out = runner.invoke(cli.app, ["history", "--db", db])
+
+        assert out.exit_code == 0 and ("PASS" in out.output or "WARN" in out.output)
+
+    def test_diff_between_two_saved_runs(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-test-key")
+        monkeypatch.setattr(
+            cli,
+            "get_guidelines",
+            lambda **_kwargs: Guidelines(
+                available=True, text="2.3", sections={"2.3": "2.3"}, source="test"
+            ),
+        )
+        db = f"sqlite:///{tmp_path / 'runs.db'}"
+
+        # First run: a canned fail verdict -> BLOCK.
+        monkeypatch.setattr(cli, "judge_field", lambda *_a, **_k: [_fail_verdict()])
+        r1 = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--db", db])
+        assert r1.exit_code == 1, r1.output
+
+        # Second run: no findings -> PASS. The planted fail is now "resolved".
+        monkeypatch.setattr(cli, "judge_field", lambda *_a, **_k: [])
+        r2 = runner.invoke(cli.app, [FIXTURE_ROOT, "--no-vision", "--db", db])
+        assert r2.exit_code == 0, r2.output
+
+        hist = runner.invoke(cli.app, ["history", "--db", db, "--format", "json"])
+        assert hist.exit_code == 0, hist.output
+        runs = json.loads(hist.output)
+        assert len(runs) == 2
+        # `history` lists newest first: runs[0] is the second (PASS) run,
+        # runs[1] is the first (BLOCK) run.
+        newer_id, older_id = runs[0]["run_id"], runs[1]["run_id"]
+
+        diff_result = runner.invoke(cli.app, ["diff", older_id, newer_id, "--db", db])
+
+        assert diff_result.exit_code == 0, diff_result.output
+        assert "# Run diff: BLOCK ->" in diff_result.output
+        assert "## Resolved (1)" in diff_result.output
+        assert "placeholder_text" in diff_result.output
+
+    def test_bad_db_scheme_exits_2_no_traceback(self):
+        result = runner.invoke(cli.app, [FIXTURE_ROOT, "--db", "mysql://h/d", "--dry-run"])
+
+        assert result.exit_code == 2 and "Traceback" not in result.output
         assert "WARNING" not in result.output

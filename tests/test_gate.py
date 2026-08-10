@@ -129,3 +129,37 @@ def test_evaluate_passes_panels_through_without_changing_status():
     report = evaluate([rv], [], panels=[panel])
     assert report.status == "WARN" and len(report.panels) == 1
     assert evaluate([rv], []).panels == []      # default stays empty
+
+
+# --- Task 1 (v2 sub-project C): code findings fold into the gate ---
+from asc_metadata_verifier.models import CodeFinding  # noqa: E402
+
+
+def _cf(sev: str) -> CodeFinding:
+    return CodeFinding(
+        rule_id="r",
+        category="c",
+        severity=sev,
+        guideline_ref="2.5",
+        file="A.swift",
+        line=1,
+        evidence="e",
+        detail="d",
+    )
+
+
+def test_high_code_finding_blocks():
+    r = evaluate([], [], code_findings=[_cf("high")])
+    assert r.status == "BLOCK" and len(r.code_findings) == 1
+
+
+def test_medium_code_finding_warns():
+    assert evaluate([], [], code_findings=[_cf("medium")]).status == "WARN"
+
+
+def test_low_code_finding_warns():
+    assert evaluate([], [], code_findings=[_cf("low")]).status == "WARN"
+
+
+def test_code_findings_absent_is_unchanged():
+    assert evaluate([], []).status == "PASS"

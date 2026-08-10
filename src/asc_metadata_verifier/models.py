@@ -46,6 +46,39 @@ class PanelVerdict(BaseModel):
     agreement: float | None = None
 
 
+class CodeFinding(BaseModel):
+    """One static (or jury-adjudicated) code/config rejection-risk finding.
+
+    Anchored to a real `file` (+ `line` when the token has one) and an
+    `evidence` quote a human can open and verify. `source="jury"` items carry
+    the full `panel` vote record -- LLM judgment is never presented as a
+    deterministic fact."""
+
+    rule_id: str
+    category: str
+    severity: Literal["low", "medium", "high"]
+    guideline_ref: str
+    file: str
+    line: int | None = None
+    symbol: str | None = None
+    evidence: str
+    detail: str
+    suggested_fix: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0, default=1.0)
+    source: Literal["static", "jury"] = "static"
+    panel: PanelVerdict | None = None
+
+
+class CodeReport(BaseModel):
+    """Result of a standalone `asc-verify code <path>` run."""
+
+    status: Literal["PASS", "WARN", "BLOCK"]
+    findings: list[CodeFinding] = Field(default_factory=list)
+    analyzed_files: int = 0
+    parser_backend: str = ""
+    jury_used: bool = False
+
+
 class LocaleMetadata(BaseModel):
     locale: str
     app_name: str | None = None
@@ -85,3 +118,4 @@ class GateReport(BaseModel):
     deterministic_findings: list[DeterministicFinding] = Field(default_factory=list)
     guidelines_available: bool
     panels: list[PanelVerdict] = Field(default_factory=list)
+    code_findings: list[CodeFinding] = Field(default_factory=list)

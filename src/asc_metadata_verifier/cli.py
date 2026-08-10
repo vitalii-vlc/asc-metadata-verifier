@@ -25,7 +25,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import click
 import typer
@@ -66,7 +66,7 @@ from asc_metadata_verifier.report import (
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
-    from asc_metadata_verifier.models import GateReport, PanelVerdict
+    from asc_metadata_verifier.models import AppMetadata, GateReport, PanelVerdict
     from asc_metadata_verifier.persistence.repository import Repository
 
 
@@ -160,6 +160,29 @@ def _build_judge_set(
     return JudgeSet(specs=specs, consensus=consensus)
 
 
+class VerifyOutcome(NamedTuple):
+    """`run_verify`'s return value: `report`/`llm_skipped` (the original two
+    fields) plus `meta` (the ingested `AppMetadata`) and `guidelines` (the
+    `Guidelines` actually used to produce `report`, or the unavailable
+    placeholder in `--dry-run`), threaded out so a caller like `verify` can
+    persist them (`RunRecord.app_id`/`.primary_locale`, a guideline snapshot)
+    without re-ingesting or re-fetching -- guaranteeing what gets persisted is
+    exactly what `report` was graded against.
+
+    This widens `run_verify`'s return arity from the original `(report,
+    llm_skipped)` 2-tuple to 4 fields, so `report, llm_skipped =
+    cli.run_verify(...)` (a 2-value unpack) no longer works -- callers that
+    only want those two either unpack all four (`report, llm_skipped, meta,
+    guidelines = ...`) or use the named fields (`outcome.report`,
+    `outcome.llm_skipped`).
+    """
+
+    report: GateReport
+    llm_skipped: bool
+    meta: AppMetadata
+    guidelines: Guidelines
+
+
 def run_verify(
     *,
     path: str | Path | None = None,
@@ -178,8 +201,9 @@ def run_verify(
     consensus: str | None = None,
     max_concurrency: int = 8,
     cache: VerdictCache | None = None,
-) -> tuple[GateReport, bool]:
-    """Run the full verification pipeline; return `(report, llm_skipped)`.
+) -> VerifyOutcome:
+    """Run the full verification pipeline; return a `VerifyOutcome`
+    (unpacks as `report, llm_skipped, meta, guidelines`).
 
     Adapter selection precedence:
       1. All four `--asc-api-*` values given -> `AscApiAdapter` (live App
@@ -325,7 +349,9 @@ def run_verify(
                 panels=panels,
             )
 
-        return report, llm_skipped
+        return VerifyOutcome(
+            report=report, llm_skipped=llm_skipped, meta=meta, guidelines=guidelines
+        )
 
 
 def _run_source(*, asc_api_app_id: str | None, yaml_path: str | Path | None) -> str:
@@ -368,26 +394,25 @@ def _persist_run(
     *,
     repo: Repository,
     report: GateReport,
-    dry_run: bool,
-    guidelines_path: str | Path | None,
+    meta: AppMetadata,
+    guidelines: Guidelines,
     fail_on: str,
     judges_path: str | Path | None,
     judge_cli: list[str] | None,
     consensus: str | None,
     source: str,
 ) -> None:
-    """Snapshot the guideline text (when available) and `save_run`.
+    """Snapshot the guideline text actually used for this run (when
+    available) and `save_run`.
 
-    Re-fetches guidelines via `get_guidelines` -- the same monkeypatchable
-    seam `run_verify` itself uses -- rather than threading the `Guidelines`
-    object out of `run_verify`, since `run_verify`'s `(report, llm_skipped)`
-    return contract is fixed (every pre-existing caller unpacks exactly two
-    values). For a `--guidelines` override this just re-reads the same local
-    file (cheap, deterministic); for a live fetch this is a second network
-    round-trip -- an accepted cost of persistence being an opt-in, additive
-    feature. Skipped entirely when `dry_run` is set, since `run_verify` never
-    fetches guidelines in `--dry-run` either -- `--dry-run --db ...` must stay
-    fully offline, not silently make a network call just to persist.
+    `guidelines`/`meta` are the SAME objects `run_verify` used to produce
+    `report` (threaded out via `VerifyOutcome`, not re-fetched/re-ingested)
+    -- so the persisted snapshot can never mismatch what the verdicts were
+    actually graded against, and there is no second network round-trip.
+    `guidelines.available` is always `False` in `--dry-run` (`run_verify`
+    never fetches guidelines there), so `guideline_snapshot_hash` naturally
+    stays `None` and no network call is ever made just to persist a
+    `--dry-run --db ...` run.
 
     Any exception raised here (a `RepositoryError`, or anything else) is left
     to propagate -- the caller (`verify`) is responsible for catching it and
@@ -395,22 +420,16 @@ def _persist_run(
     report-first-then-save contract.
     """
     guideline_snapshot_hash = None
-    if not dry_run:
-        guidelines = get_guidelines(session_id=uuid.uuid4().hex, override_path=guidelines_path)
-        if guidelines.available and guidelines.text:
-            guideline_snapshot_hash = snapshot_hash(guidelines.text)
-            repo.put_guideline_snapshot(guideline_snapshot_hash, guidelines.text)
+    if guidelines.available and guidelines.text:
+        guideline_snapshot_hash = snapshot_hash(guidelines.text)
+        repo.put_guideline_snapshot(guideline_snapshot_hash, guidelines.text)
 
     record = RunRecord(
         run_id=uuid.uuid4().hex[:12],
         created_at=datetime.now(UTC).isoformat(),
-        # app_id/version/primary_locale are left unset: `run_verify` returns
-        # only `(report, llm_skipped)` (fixed contract, see above), not the
-        # ingested `AppMetadata` these would come from. All three are
-        # Optional on `RunRecord` for exactly this reason.
-        app_id=None,
-        version=None,
-        primary_locale=None,
+        app_id=meta.app_id,
+        version=None,  # not in `AppMetadata` today -- a future ASC-API-sourced adapter may add it
+        primary_locale=meta.primary_locale,
         source=source,
         config_fingerprint=_config_fingerprint(
             fail_on=fail_on, judges_path=judges_path, judge_cli=judge_cli, consensus=consensus
@@ -525,7 +544,7 @@ def verify(
     verdict_cache = VerdictCache(repo) if (repo is not None and cache) else None
 
     try:
-        report, llm_skipped = run_verify(
+        report, llm_skipped, meta, guidelines = run_verify(
             path=path,
             yaml_path=yaml_path,
             asc_api_app_id=asc_api_app_id,
@@ -592,8 +611,8 @@ def verify(
             _persist_run(
                 repo=repo,
                 report=report,
-                dry_run=dry_run,
-                guidelines_path=guidelines_path,
+                meta=meta,
+                guidelines=guidelines,
                 fail_on=fail_on.value,
                 judges_path=judges_path,
                 judge_cli=judge_cli,

@@ -624,10 +624,12 @@ def verify(
         )
 
     if pages:
-        # Deterministic reachability only (no jury on the verify path); rebuild the
+        # Deterministic reachability only (no jury on the verify path). code_path
+        # is intentionally NOT forwarded: the profile is only used by the jury,
+        # so forwarding it would re-run the code analyzer for nothing. Rebuild the
         # gate preserving any code findings already folded in above.
         page_findings, _pc, _ju = _run_pages(
-            meta=meta, code_path=str(code_path) if code_path else None, jury=False,
+            meta=meta, code_path=None, jury=False,
             judges_path=None, consensus=DEFAULT_POLICY, pages_dir=pages_dir, fail_on=fail_on.value,
         )
         report = evaluate(

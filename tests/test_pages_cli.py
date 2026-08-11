@@ -48,3 +48,18 @@ def test_verify_with_pages_folds_findings(tmp_path):
     res = runner.invoke(app, ["verify", "--yaml", "tests/fixtures/metadata.yaml", "--dry-run",
                               "--pages", "--pages-dir", str(d)])
     assert "page-unreachable" in res.output
+
+
+def test_verify_with_code_and_pages_composes(tmp_path):
+    import plistlib
+
+    import pytest
+    pytest.importorskip("tree_sitter_language_pack")
+    (tmp_path / "App").mkdir()
+    (tmp_path / "App/View.swift").write_text("let w = UIWebView()\n")
+    (tmp_path / "App/Info.plist").write_bytes(
+        plistlib.dumps({"ITSAppUsesNonExemptEncryption": False}))
+    d = _pages_dir(tmp_path, {})
+    res = runner.invoke(app, ["verify", "--yaml", "tests/fixtures/metadata.yaml", "--dry-run",
+                              "--code", str(tmp_path), "--pages", "--pages-dir", str(d)])
+    assert "uiwebview-usage" in res.output and "page-unreachable" in res.output

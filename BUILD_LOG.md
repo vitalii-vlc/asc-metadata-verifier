@@ -994,7 +994,7 @@ built from C's findings → `pages/analyzer.py` orchestrator.
 ### Verification
 
 Built task-by-task (TDD, 10 tasks) on `feat/pages-analyzer`. Full suite with the
-`[code]` extra: `uv run pytest -q` → **370 passed, 4 skipped** (3 real-model
+`[code]` extra: `uv run pytest -q` → **371 passed, 4 skipped** (3 real-model
 `ANTHROPIC_API_KEY`-gated, 1 ChromaIndex gated behind `semantic`).
 `uv run ruff check .` → **All checks passed!** A live offline end-to-end run
 (`pages --yaml … --pages-dir …`) surfaced findings across all three page types

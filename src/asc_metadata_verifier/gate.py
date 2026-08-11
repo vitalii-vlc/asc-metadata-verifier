@@ -12,6 +12,7 @@ then the overall `GateReport.status` is rolled up from those levels per the
 from typing import Literal
 
 from asc_metadata_verifier.models import (
+    CodeFinding,
     DeterministicFinding,
     GateReport,
     PanelVerdict,
@@ -53,12 +54,20 @@ def _finding_level(finding: DeterministicFinding) -> Level:
     return _DETERMINISTIC_LEVEL.get(finding.kind, "none")
 
 
+def _code_level(finding: CodeFinding) -> Level:
+    """high -> block (near-certain rejection); medium/low -> warn. Mirrors
+    `_verdict_level`: only high severity blocks by default. A CodeFinding's
+    severity is always low/medium/high, so this never returns "none"."""
+    return "block" if finding.severity == "high" else "warn"
+
+
 def evaluate(
     verdicts: list[RubricVerdict],
     deterministic_findings: list[DeterministicFinding],
     fail_on: Literal["fail", "warn"] = "fail",
     guidelines_available: bool = True,
     panels: list[PanelVerdict] | None = None,
+    code_findings: list[CodeFinding] | None = None,
 ) -> GateReport:
     """Aggregate verdicts + deterministic findings into a single GateReport.
 
@@ -72,8 +81,10 @@ def evaluate(
     - `fail_on="warn"` (lowered threshold): status is "BLOCK" if any item is
       block-worthy OR warn-worthy; else "PASS".
     """
+    code_findings = code_findings or []
     levels: list[Level] = [_verdict_level(v) for v in verdicts]
     levels.extend(_finding_level(f) for f in deterministic_findings)
+    levels.extend(_code_level(f) for f in code_findings)
 
     has_block = "block" in levels
     has_warn = "warn" in levels
@@ -90,4 +101,5 @@ def evaluate(
         deterministic_findings=deterministic_findings,
         guidelines_available=guidelines_available,
         panels=panels or [],
+        code_findings=code_findings,
     )

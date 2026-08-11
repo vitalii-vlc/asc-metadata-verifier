@@ -217,6 +217,38 @@ There is **no bundled/default embedding model.** `ChromaIndex` always takes an i
 
 > **Honest status.** With no `--db`, `asc-verify` is unchanged from every example earlier in this README: byte-identical output, fully offline, zero new dependencies. The verdict cache never alters a verdict — a hit is always a literal replay of an earlier, identical computation. `ChromaIndex` plus a real embedder has **not** been exercised in CI: `chromadb` is an optional extra CI does not install, and its one test (`tests/test_semantic.py::test_chroma_index_gated_behind_dependency`) uses `pytest.importorskip("chromadb")` and skips cleanly rather than running — only `StubEmbedder`/`InMemoryIndex` are genuinely exercised. Semantic recall has no default wiring in this codebase at all: using it for real requires the caller to supply both an embedder and an index.
 
+## Code analysis (optional)
+
+Beyond metadata, `asc-verify` can scan the app's **source and config** for rejection risk — a deep, AST-level static analysis of a local Apple project (Swift/Obj-C + `Info.plist` + `*.entitlements` + `PrivacyInfo.xcprivacy`). Install the extra and point it at the project root:
+
+```bash
+uv sync --extra code            # or: pip install "asc-metadata-verifier[code]"
+asc-verify code path/to/MyApp                 # standalone; exits 1 on BLOCK
+asc-verify code path/to/MyApp --format json   # full CodeReport as JSON
+asc-verify verify <metadata> --code path/to/MyApp   # fold code findings into one gate
+```
+
+Every finding is anchored to a real `file:line` + an `evidence` quote and maps to a specific App Store Review Guideline. The curated rule catalog:
+
+| rule_id | guideline | severity |
+|---|---|---|
+| `idfa-without-att` (IDFA used, no ATT prompt / usage string) | 5.1.2 | high |
+| `missing-usage-string` (privacy API used, `NS*UsageDescription` absent) | 5.1.1 | high |
+| `required-reason-api-undeclared` (required-reason API vs `PrivacyInfo.xcprivacy`) | privacy-manifest | high |
+| `boilerplate-usage-string` (vague usage string) | 5.1.1 | medium |
+| `uiwebview-usage` | 2.5.x | high |
+| `private-api-symbol` (curated denylist) | 2.5.1 | high |
+| `ats-arbitrary-loads` (`NSAllowsArbitraryLoads`) | 2.5.2 | medium |
+| `insecure-http-endpoint` (`http://` literal) | 2.5.2 | low |
+| `encryption-export-undeclared` (`ITSAppUsesNonExemptEncryption` absent) | export compliance | medium |
+| `canopenurl-undeclared-scheme` (scheme not in `LSApplicationQueriesSchemes`) | 2.5.x | low |
+
+The parser is pluggable: **tree-sitter** is the default offline backend (Swift + Obj-C grammars, no Xcode needed). An optional higher-fidelity **SwiftSyntax** backend is a **bring-your-own subprocess helper** — `--backend swiftsyntax --swiftsyntax-cmd <cmd>` (or `ASC_SWIFTSYNTAX_CMD`); a command that reads a source path and prints AST-surface JSON. If it's unavailable, the analyzer falls back to tree-sitter with a factual `swiftsyntax(unavailable)` marker rather than fabricating anything.
+
+An **opt-in LLM jury** (`--jury --judges judges.yaml`) judges the interpretive calls the AST can't decide — vague usage strings, and a fixed set of questions like account-gating vs 5.1.1(v) or IAP-bypass vs 3.1.1. Jury-produced items are tagged `source: "jury"` and carry the full vote record; they are never presented as deterministic facts.
+
+> **Honest status & boundary.** This is **AST-structural** analysis — symbol/import/call/string presence with token-accurate boundaries and cross-artifact (code × manifest) correlation. It is **not** full type inference, whole-program data-flow/taint, or dynamic analysis, and it never claims to be. The rule catalog and the `private-api-symbol` / `required-reason-api-undeclared` lists are **curated and non-exhaustive** — false negatives are expected and documented per rule module. With no `code` command and no `--code` flag, `verify` is byte-unchanged and pulls zero new core dependencies (tree-sitter lives behind the `[code]` extra). `code` with no `--jury` makes zero network calls. The SwiftSyntax backend is exercised in tests only via a fake helper (no real Swift toolchain in CI); the fallback path is directly tested.
+
 ## The eval-science backbone
 
 The judge is **measured, not asserted.** A curated golden dataset of **44 labeled cases** with **multi-label ground truth** (`src/asc_metadata_verifier/evals/golden/cases.jsonl` — 30 positives across all 8 rubric dimensions + 14 clean controls engineered to stress false positives) runs through a **pydantic-evals** meta-eval (`src/asc_metadata_verifier/evals/meta_eval.py`) that computes per-dimension precision/recall and overall accuracy over a full 44×8 one-vs-rest grid, plus a failure taxonomy (`false_negative` / `false_positive` / `wrong_dimension` / `wrong_severity`). Multi-label ground truth means a case that legitimately trips two dimensions (e.g. a keyword list that both stuffs keywords *and* names a competitor's trademark) isn't scored as a judge false positive. `BUILD_LOG.md` records the pre-registered methodology and the honest status of the real-model run (not yet executed — no key in the dev environment; no numbers fabricated).
@@ -228,13 +260,15 @@ The package ships an `app-store-review-gate` skill (`src/asc_metadata_verifier/.
 ## Development
 
 ```bash
-uv sync
-uv run pytest          # 282 passed, 4 skipped (3 are real-model tests gated behind ANTHROPIC_API_KEY; 1 is the
-                        # ChromaIndex test, skipped when the optional `semantic` extra isn't installed)
+uv sync --extra code   # `--extra code` adds the tree-sitter grammars the code analyzer needs
+uv run pytest          # 333 passed, 4 skipped with the [code] extra installed. The 4 skips: 3 real-model
+                        # tests gated behind ANTHROPIC_API_KEY, 1 ChromaIndex test gated behind the
+                        # `semantic` extra. Without `--extra code`, the tree-sitter-backed code tests
+                        # (parser + code CLI) additionally skip via pytest.importorskip.
 uv run ruff check .
 ```
 
-The whole suite runs offline: model calls use pydantic-ai's `TestModel`/`FunctionModel`, the guidelines fetch and ASC API are mocked, and real-model tests are gated behind `ANTHROPIC_API_KEY`.
+The whole suite runs offline: model calls use pydantic-ai's `TestModel`/`FunctionModel`, the guidelines fetch and ASC API are mocked, the code analyzer's tree-sitter grammars are vendored by the `[code]` extra, and real-model tests are gated behind `ANTHROPIC_API_KEY`.
 
 ## License
 

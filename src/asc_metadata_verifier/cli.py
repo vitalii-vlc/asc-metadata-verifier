@@ -60,6 +60,8 @@ from asc_metadata_verifier.persistence.semantic import SemanticIndex
 from asc_metadata_verifier.report import (
     compute_degradation,
     exit_code,
+    render_code_report_json,
+    render_code_report_text,
     render_json,
     render_markdown,
 )
@@ -544,6 +546,12 @@ def verify(
         help="Do not persist this run's report to --db (a --cache read/write, if "
         "enabled, still happens).",
     ),
+    code_path: Path | None = typer.Option(
+        None,
+        "--code",
+        help="Also run the deep code analyzer on this app-project root and fold its "
+        "findings into the unified gate. Offline; requires the [code] extra.",
+    ),
 ) -> None:
     """Verify App Store Connect metadata against deterministic checks and an LLM judge."""
     repo: Repository | None = None
@@ -588,6 +596,19 @@ def verify(
         # of the actionable "no tracebacks" message the rest of the CLI gives.
         typer.echo(f"Error: guidelines file not found: {guidelines_path}", err=True)
         raise typer.Exit(code=2) from None
+
+    if code_path is not None:
+        code_findings, _backend, _n, _proj, _asts = _analyze_project(code_path, "auto", None)
+        # Rebuild the gate with the SAME verdicts/findings/panels, now folding
+        # code findings in, so status + exit code cover metadata AND code.
+        report = evaluate(
+            report.verdicts,
+            report.deterministic_findings,
+            fail_on=fail_on.value,
+            guidelines_available=report.guidelines_available,
+            panels=report.panels,
+            code_findings=code_findings,
+        )
 
     if output_format is OutputFormat.json:
         # Raw JSON only on stdout (no rich decoration) so it stays pipeable/parseable.
@@ -636,6 +657,93 @@ def verify(
             typer.echo(f"WARNING: failed to persist run: {exc}", err=True)
 
     raise typer.Exit(code=exit_code(report))
+
+
+def _analyze_project(project_path, backend, swiftsyntax_cmd):
+    """Shared static-analysis helper for `code` and `verify --code`.
+
+    Loads the project, builds the parser, and returns
+    `(findings, parser_backend, analyzed_files, project, asts)`. Exits 2
+    (actionable, no traceback) when the path is missing or the resolved parser
+    is unavailable -- including the swiftsyntax(unavailable)->tree-sitter
+    fallback when the [code] extra itself is absent -- never silently returns
+    zero findings as if the code were clean, and never leaks a traceback."""
+    from asc_metadata_verifier.code.analyzer import analyze
+    from asc_metadata_verifier.code.parser import build_parser
+    from asc_metadata_verifier.code.project import load_project
+
+    if not Path(project_path).exists():
+        typer.echo(f"Error: path not found: {project_path}", err=True)
+        raise typer.Exit(code=2) from None
+
+    parser = build_parser(backend, swiftsyntax_cmd=swiftsyntax_cmd)
+    if not parser.available():
+        typer.echo(
+            "Error: install the code-analysis extra:  uv sync --extra code  "
+            "(pip install 'asc-metadata-verifier[code]')",
+            err=True,
+        )
+        raise typer.Exit(code=2) from None
+
+    project = load_project(project_path)
+    findings, asts = analyze(project, parser)
+    return findings, parser.backend_name, len(project.sources), project, asts
+
+
+@app.command()
+def code(
+    project_path: Path = typer.Argument(..., help="Path to the app project root."),
+    backend: str = typer.Option(
+        "auto", "--backend", help="Parser backend: 'auto' (tree-sitter) or 'swiftsyntax'."
+    ),
+    fail_on: FailOn = typer.Option(
+        FailOn.fail, "--fail-on", help="Gate threshold: block on 'fail' or already on 'warn'."
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.md, "--format", help="Report output format (md text or json)."
+    ),
+    jury: bool = typer.Option(
+        False, "--jury", help="Enable the opt-in LLM jury layer (needs a judges config)."
+    ),
+    judges_path: Path | None = typer.Option(
+        None, "--judges", help="Path to judges.yaml (jury mode)."
+    ),
+    consensus: str = typer.Option(
+        DEFAULT_POLICY, "--consensus", help="Consensus policy (jury mode)."
+    ),
+    swiftsyntax_cmd: str | None = typer.Option(
+        None, "--swiftsyntax-cmd", envvar="ASC_SWIFTSYNTAX_CMD",
+        help="BYO SwiftSyntax helper command (used only with --backend swiftsyntax).",
+    ),
+) -> None:
+    """Analyze an app's source + config for App Store rejection risk (deep static)."""
+    findings, backend_name, analyzed, project, asts = _analyze_project(
+        project_path, backend, swiftsyntax_cmd
+    )
+
+    jury_used = False
+    if jury:
+        from asc_metadata_verifier.code.jury import apply_jury
+
+        try:
+            findings, jury_used = apply_jury(
+                findings, project, asts, judges=judges_path, policy=consensus
+            )
+        except JudgeConfigError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2) from None
+
+    from asc_metadata_verifier.code.analyzer import build_code_report
+
+    report = build_code_report(
+        findings, analyzed_files=analyzed, backend=backend_name,
+        fail_on=fail_on.value, jury_used=jury_used,
+    )
+    if output_format is OutputFormat.json:
+        typer.echo(render_code_report_json(report))
+    else:
+        typer.echo(render_code_report_text(report))
+    raise typer.Exit(code=1 if report.status == "BLOCK" else 0)
 
 
 _HISTORY_ROW_FORMAT = "{run_id:<14}  {created_at:<32}  {gate_status:<7}  {source:<10}  {app_id}"

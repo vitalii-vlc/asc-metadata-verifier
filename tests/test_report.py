@@ -421,3 +421,28 @@ class TestDegradedJuryNote:
         md = render_markdown(GateReport(status="PASS", guidelines_available=True))
         assert "judge call(s) failed" not in md
         assert "defaulted to pass" not in md
+
+
+# --- Task 8 (v2 sub-project C): code report rendering ---
+from asc_metadata_verifier.models import CodeFinding, CodeReport  # noqa: E402
+from asc_metadata_verifier.report import (  # noqa: E402
+    render_code_report_json,
+    render_code_report_text,
+)
+
+
+def _code_report() -> CodeReport:
+    f = CodeFinding(rule_id="uiwebview-usage", category="deprecated-api", severity="high",
+                    guideline_ref="2.5.x", file="A.swift", line=1, evidence="UIWebView", detail="d")
+    return CodeReport(status="BLOCK", findings=[f], analyzed_files=1, parser_backend="tree-sitter")
+
+
+def test_render_code_text_shows_anchor_and_guideline():
+    out = render_code_report_text(_code_report())
+    assert "A.swift:1" in out and "2.5.x" in out and "BLOCK" in out
+
+
+def test_render_code_json_roundtrips():
+    import json
+    data = json.loads(render_code_report_json(_code_report()))
+    assert data["status"] == "BLOCK" and data["findings"][0]["rule_id"] == "uiwebview-usage"

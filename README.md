@@ -249,6 +249,24 @@ An **opt-in LLM jury** (`--jury --judges judges.yaml`) judges the interpretive c
 
 > **Honest status & boundary.** This is **AST-structural** analysis — symbol/import/call/string presence with token-accurate boundaries and cross-artifact (code × manifest) correlation. It is **not** full type inference, whole-program data-flow/taint, or dynamic analysis, and it never claims to be. The rule catalog and the `private-api-symbol` / `required-reason-api-undeclared` lists are **curated and non-exhaustive** — false negatives are expected and documented per rule module. With no `code` command and no `--code` flag, `verify` is byte-unchanged and pulls zero new core dependencies (tree-sitter lives behind the `[code]` extra). `code` with no `--jury` makes zero network calls. The SwiftSyntax backend is exercised in tests only via a fake helper (no real Swift toolchain in CI); the fallback path is directly tested.
 
+## Pages analysis (optional)
+
+Beyond metadata and code, `asc-verify` can check the app's **external web pages** — the declared privacy-policy, support, and marketing URLs — for rejection risk:
+
+```bash
+asc-verify pages <metadata-source>                    # fetch + reachability, exits 1 on BLOCK
+asc-verify pages --yaml metadata.yaml --pages-dir ./snapshots   # fully offline (saved HTML)
+asc-verify pages --yaml metadata.yaml --code ./MyApp --jury --judges judges.yaml
+asc-verify verify ./fastlane --pages                  # fold page reachability into the unified gate
+```
+
+- **Deterministic reachability** (offline-capable, no LLM): `page-unreachable` (a declared URL that 404s/times out — a near-certain **5.1.1** rejection for privacy/support), `page-empty`, `page-offsite-redirect`, and `privacy-policy-missing`.
+- **Opt-in jury** (`--jury`): judges privacy-policy adequacy (5.1.1), support-page adequacy, and marketing overclaim (2.3.x). With `--code`, it runs the **privacy↔code cross-reference** — `build_profile` maps the code analyzer's findings to policy-relevant data categories (camera, location, contacts, photos, mic, calendar, health, advertising identifier) and the jury judges whether the fetched policy actually discloses each. Undisclosed collection → a `privacy-code-mismatch` finding, tagged `source: "jury"` with the full vote record.
+
+The fetcher is **bounded and SSRF-guarded**: http(s) only, a resolved host in a private/loopback/link-local/reserved range is refused, each redirect hop is re-validated (hop-capped), with a connect/read timeout and a streamed response-size cap.
+
+> **Honest status & boundary.** `pages` **does** use the network by design (it fetches live pages) — `--pages-dir` (a `pages.json` manifest of saved HTML) gives a fully offline path, and the whole test suite runs offline via a local fetcher / mocked transport. **Zero new core deps** (httpx is already present). The SSRF guard is **resolve-then-check**, so **DNS-rebinding is a known residual** not hardened in this build. The cross-reference is **jury-judged** (soft, LLM opinion, never asserted as deterministic fact) and needs `--jury` + `--code`; without them, `pages` is reachability-only. It does **not** crawl or follow links, and `pages` runs are not yet persisted.
+
 ## The eval-science backbone
 
 The judge is **measured, not asserted.** A curated golden dataset of **44 labeled cases** with **multi-label ground truth** (`src/asc_metadata_verifier/evals/golden/cases.jsonl` — 30 positives across all 8 rubric dimensions + 14 clean controls engineered to stress false positives) runs through a **pydantic-evals** meta-eval (`src/asc_metadata_verifier/evals/meta_eval.py`) that computes per-dimension precision/recall and overall accuracy over a full 44×8 one-vs-rest grid, plus a failure taxonomy (`false_negative` / `false_positive` / `wrong_dimension` / `wrong_severity`). Multi-label ground truth means a case that legitimately trips two dimensions (e.g. a keyword list that both stuffs keywords *and* names a competitor's trademark) isn't scored as a judge false positive. `BUILD_LOG.md` records the pre-registered methodology and the honest status of the real-model run (not yet executed — no key in the dev environment; no numbers fabricated).
@@ -261,7 +279,7 @@ The package ships an `app-store-review-gate` skill (`src/asc_metadata_verifier/.
 
 ```bash
 uv sync --extra code   # `--extra code` adds the tree-sitter grammars the code analyzer needs
-uv run pytest          # 333 passed, 4 skipped with the [code] extra installed. The 4 skips: 3 real-model
+uv run pytest          # 370 passed, 4 skipped with the [code] extra installed. The 4 skips: 3 real-model
                         # tests gated behind ANTHROPIC_API_KEY, 1 ChromaIndex test gated behind the
                         # `semantic` extra. Without `--extra code`, the tree-sitter-backed code tests
                         # (parser + code CLI) additionally skip via pytest.importorskip.

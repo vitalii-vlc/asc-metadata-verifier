@@ -12,6 +12,8 @@ from asc_metadata_verifier.models import (
     CodeReport,
     DeterministicFinding,
     GateReport,
+    PageFinding,
+    PagesReport,
     PanelVerdict,
     RubricVerdict,
 )
@@ -175,6 +177,42 @@ def render_code_report_json(report: CodeReport) -> str:
     return report.model_dump_json(indent=2)
 
 
+def _render_page_findings(findings: list[PageFinding]) -> list[str]:
+    """Render page findings grouped by page type. Empty list -> no lines."""
+    if not findings:
+        return []
+    lines: list[str] = ["## Page findings", ""]
+    by_type: dict[str, list[PageFinding]] = defaultdict(list)
+    for f in findings:
+        by_type[f.page_type].append(f)
+    for page_type in sorted(by_type):
+        lines.append(f"### {page_type}")
+        for f in by_type[page_type]:
+            tag = "jury" if f.source == "jury" else "static"
+            lines.append(f"- [{f.severity}] {f.rule_id} ({f.guideline_ref}) [{tag}] {f.url}")
+            lines.append(f"    {f.detail} — evidence: {f.evidence!r}")
+            if f.suggested_fix:
+                lines.append(f"    fix: {f.suggested_fix}")
+        lines.append("")
+    return lines
+
+
+def render_pages_report_text(report: PagesReport) -> str:
+    """Render a standalone PagesReport as human-readable text."""
+    header = [
+        f"Pages analysis: {report.status}",
+        f"({report.pages_checked} pages, jury={report.jury_used})",
+        "",
+    ]
+    body = _render_page_findings(report.findings) or ["No page findings."]
+    return "\n".join(header + body).rstrip() + "\n"
+
+
+def render_pages_report_json(report: PagesReport) -> str:
+    """Serialize a PagesReport to JSON (round-trips via `PagesReport.model_validate_json`)."""
+    return report.model_dump_json(indent=2)
+
+
 def render_markdown(report: GateReport) -> str:
     """Render a GateReport as a human-readable markdown report.
 
@@ -208,6 +246,7 @@ def render_markdown(report: GateReport) -> str:
     lines.extend(_render_panels(report.panels))
     lines.extend(_render_findings(report.deterministic_findings))
     lines.extend(_render_code_findings(report.code_findings))
+    lines.extend(_render_page_findings(report.page_findings))
 
     return "\n".join(lines).rstrip() + "\n"
 

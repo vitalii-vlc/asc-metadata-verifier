@@ -64,6 +64,8 @@ from asc_metadata_verifier.report import (
     render_code_report_text,
     render_json,
     render_markdown,
+    render_pages_report_json,
+    render_pages_report_text,
 )
 
 if TYPE_CHECKING:
@@ -552,6 +554,17 @@ def verify(
         help="Also run the deep code analyzer on this app-project root and fold its "
         "findings into the unified gate. Offline; requires the [code] extra.",
     ),
+    pages: bool = typer.Option(
+        False,
+        "--pages",
+        help="Also fetch + check the declared privacy/support/marketing pages "
+        "(deterministic reachability) and fold findings into the unified gate.",
+    ),
+    pages_dir: str | None = typer.Option(
+        None,
+        "--pages-dir",
+        help="Offline pages source for --pages: a dir with a pages.json manifest {url: file}.",
+    ),
 ) -> None:
     """Verify App Store Connect metadata against deterministic checks and an LLM judge."""
     repo: Repository | None = None
@@ -608,6 +621,23 @@ def verify(
             guidelines_available=report.guidelines_available,
             panels=report.panels,
             code_findings=code_findings,
+        )
+
+    if pages:
+        # Deterministic reachability only (no jury on the verify path); rebuild the
+        # gate preserving any code findings already folded in above.
+        page_findings, _pc, _ju = _run_pages(
+            meta=meta, code_path=str(code_path) if code_path else None, jury=False,
+            judges_path=None, consensus=DEFAULT_POLICY, pages_dir=pages_dir, fail_on=fail_on.value,
+        )
+        report = evaluate(
+            report.verdicts,
+            report.deterministic_findings,
+            fail_on=fail_on.value,
+            guidelines_available=report.guidelines_available,
+            panels=report.panels,
+            code_findings=report.code_findings,
+            page_findings=page_findings,
         )
 
     if output_format is OutputFormat.json:
@@ -743,6 +773,96 @@ def code(
         typer.echo(render_code_report_json(report))
     else:
         typer.echo(render_code_report_text(report))
+    raise typer.Exit(code=1 if report.status == "BLOCK" else 0)
+
+
+def _load_pages_dir(pages_dir):
+    """Build a LocalPageFetcher from a --pages-dir containing a pages.json
+    manifest ({url: relative_html_file}). Exits 2 on a bad dir/manifest."""
+    from asc_metadata_verifier.pages.fetch import LocalPageFetcher
+
+    base = Path(pages_dir)
+    manifest = base / "pages.json"
+    if not manifest.is_file():
+        typer.echo(f"Error: --pages-dir has no pages.json manifest: {pages_dir}", err=True)
+        raise typer.Exit(code=2) from None
+    try:
+        mapping = json.loads(manifest.read_text())
+        pages = {url: (base / rel).read_text() for url, rel in mapping.items()}
+    except (OSError, ValueError) as exc:
+        typer.echo(f"Error: cannot read --pages-dir: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    return LocalPageFetcher(pages)
+
+
+def _run_pages(*, meta, code_path, jury, judges_path, consensus, pages_dir, fail_on):
+    """Shared for `pages` and `verify --pages`: returns (findings, pages_checked, jury_used)."""
+    from asc_metadata_verifier.pages.analyzer import analyze_pages
+    from asc_metadata_verifier.pages.checks import collect_page_urls
+    from asc_metadata_verifier.pages.fetch import HttpPageFetcher
+
+    fetcher = _load_pages_dir(pages_dir) if pages_dir else HttpPageFetcher()
+    code_findings = None
+    if code_path:
+        code_findings = _analyze_project(code_path, "auto", None)[0]
+    page_jury = None
+    jury_used = False
+    if jury:
+        from asc_metadata_verifier.pages.jury import PageJury
+
+        specs = _build_judge_set(judges_path, None, consensus).specs
+        page_jury = PageJury.build(specs, consensus or DEFAULT_POLICY)
+        jury_used = page_jury is not None
+    findings = analyze_pages(meta, fetcher=fetcher, code_findings=code_findings, jury=page_jury)
+    pages_checked = len({url for _t, url in collect_page_urls(meta)})
+    return findings, pages_checked, jury_used
+
+
+@app.command()
+def pages(
+    path: Path | None = typer.Argument(None, help="Fastlane root (or use --yaml / --asc-api-*)."),
+    yaml_path: Path | None = typer.Option(None, "--yaml"),
+    asc_api_app_id: str | None = typer.Option(None, "--asc-api-app-id"),
+    asc_api_key_id: str | None = typer.Option(None, "--asc-api-key-id"),
+    asc_api_issuer_id: str | None = typer.Option(None, "--asc-api-issuer-id"),
+    asc_api_key: Path | None = typer.Option(None, "--asc-api-key"),
+    code_path: str | None = typer.Option(
+        None, "--code", help="Re-run the code analyzer for the privacy<->code cross-reference."
+    ),
+    jury: bool = typer.Option(False, "--jury", help="Enable the opt-in LLM page jury."),
+    judges_path: Path | None = typer.Option(None, "--judges"),
+    consensus: str = typer.Option(DEFAULT_POLICY, "--consensus"),
+    pages_dir: str | None = typer.Option(
+        None, "--pages-dir", help="Offline: a directory with a pages.json manifest {url: file}."
+    ),
+    fail_on: FailOn = typer.Option(FailOn.fail, "--fail-on"),
+    output_format: OutputFormat = typer.Option(OutputFormat.md, "--format"),
+) -> None:
+    """Fetch + analyze the app's privacy/support/marketing pages for rejection risk."""
+    from asc_metadata_verifier.pages.analyzer import build_pages_report
+
+    try:
+        outcome = run_verify(
+            path=path, yaml_path=yaml_path, asc_api_app_id=asc_api_app_id,
+            asc_api_key_id=asc_api_key_id, asc_api_issuer_id=asc_api_issuer_id,
+            asc_api_key=asc_api_key, dry_run=True,
+        )
+    except IngestError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    try:
+        findings, pages_checked, jury_used = _run_pages(
+            meta=outcome.meta, code_path=code_path, jury=jury, judges_path=judges_path,
+            consensus=consensus, pages_dir=pages_dir, fail_on=fail_on.value,
+        )
+    except JudgeConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    report = build_pages_report(findings, pages_checked, fail_on=fail_on.value, jury_used=jury_used)
+    if output_format is OutputFormat.json:
+        typer.echo(render_pages_report_json(report))
+    else:
+        typer.echo(render_pages_report_text(report))
     raise typer.Exit(code=1 if report.status == "BLOCK" else 0)
 
 

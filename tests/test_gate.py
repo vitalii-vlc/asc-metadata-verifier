@@ -163,3 +163,25 @@ def test_low_code_finding_warns():
 
 def test_code_findings_absent_is_unchanged():
     assert evaluate([], []).status == "PASS"
+
+
+# --- Task 1 (v2 sub-project D): page findings fold into the gate ---
+from asc_metadata_verifier.models import PageFinding  # noqa: E402
+
+
+def _pf(sev: str) -> PageFinding:
+    return PageFinding(page_type="privacy", url="https://x", rule_id="r", category="privacy",
+                       severity=sev, guideline_ref="5.1.1", evidence="e", detail="d")
+
+
+def test_high_page_finding_blocks():
+    r = evaluate([], [], page_findings=[_pf("high")])
+    assert r.status == "BLOCK" and len(r.page_findings) == 1
+
+
+def test_medium_page_finding_warns():
+    assert evaluate([], [], page_findings=[_pf("medium")]).status == "WARN"
+
+
+def test_page_findings_absent_is_unchanged():
+    assert evaluate([], []).status == "PASS"

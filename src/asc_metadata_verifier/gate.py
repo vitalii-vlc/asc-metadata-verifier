@@ -15,6 +15,7 @@ from asc_metadata_verifier.models import (
     CodeFinding,
     DeterministicFinding,
     GateReport,
+    PageFinding,
     PanelVerdict,
     RubricVerdict,
 )
@@ -61,6 +62,11 @@ def _code_level(finding: CodeFinding) -> Level:
     return "block" if finding.severity == "high" else "warn"
 
 
+def _page_level(finding: PageFinding) -> Level:
+    """high -> block; medium/low -> warn. Mirrors `_code_level`."""
+    return "block" if finding.severity == "high" else "warn"
+
+
 def evaluate(
     verdicts: list[RubricVerdict],
     deterministic_findings: list[DeterministicFinding],
@@ -68,6 +74,7 @@ def evaluate(
     guidelines_available: bool = True,
     panels: list[PanelVerdict] | None = None,
     code_findings: list[CodeFinding] | None = None,
+    page_findings: list[PageFinding] | None = None,
 ) -> GateReport:
     """Aggregate verdicts + deterministic findings into a single GateReport.
 
@@ -82,9 +89,11 @@ def evaluate(
       block-worthy OR warn-worthy; else "PASS".
     """
     code_findings = code_findings or []
+    page_findings = page_findings or []
     levels: list[Level] = [_verdict_level(v) for v in verdicts]
     levels.extend(_finding_level(f) for f in deterministic_findings)
     levels.extend(_code_level(f) for f in code_findings)
+    levels.extend(_page_level(f) for f in page_findings)
 
     has_block = "block" in levels
     has_warn = "warn" in levels
@@ -102,4 +111,5 @@ def evaluate(
         guidelines_available=guidelines_available,
         panels=panels or [],
         code_findings=code_findings,
+        page_findings=page_findings,
     )

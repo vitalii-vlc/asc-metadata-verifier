@@ -446,3 +446,29 @@ def test_render_code_json_roundtrips():
     import json
     data = json.loads(render_code_report_json(_code_report()))
     assert data["status"] == "BLOCK" and data["findings"][0]["rule_id"] == "uiwebview-usage"
+
+
+# --- Task 9 (v2 sub-project D): page report rendering ---
+from asc_metadata_verifier.models import PageFinding, PagesReport  # noqa: E402
+from asc_metadata_verifier.report import (  # noqa: E402
+    render_pages_report_json,
+    render_pages_report_text,
+)
+
+
+def _pages_report() -> PagesReport:
+    f = PageFinding(page_type="privacy", url="https://x/p", rule_id="page-unreachable",
+                    category="privacy", severity="high", guideline_ref="5.1.1",
+                    evidence="HTTP 404", detail="did not load")
+    return PagesReport(status="BLOCK", findings=[f], pages_checked=1)
+
+
+def test_render_pages_text_shows_url_and_guideline():
+    out = render_pages_report_text(_pages_report())
+    assert "https://x/p" in out and "5.1.1" in out and "BLOCK" in out
+
+
+def test_render_pages_json_roundtrips():
+    import json
+    data = json.loads(render_pages_report_json(_pages_report()))
+    assert data["status"] == "BLOCK" and data["findings"][0]["rule_id"] == "page-unreachable"

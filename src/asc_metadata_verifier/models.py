@@ -79,6 +79,33 @@ class CodeReport(BaseModel):
     jury_used: bool = False
 
 
+class PageFinding(BaseModel):
+    """One privacy/support/marketing page rejection-risk finding, anchored to a
+    real URL. `source="jury"` items carry the full `panel` vote record."""
+
+    page_type: Literal["privacy", "support", "marketing"]
+    url: str
+    rule_id: str
+    category: str
+    severity: Literal["low", "medium", "high"]
+    guideline_ref: str
+    evidence: str
+    detail: str
+    suggested_fix: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0, default=1.0)
+    source: Literal["static", "jury"] = "static"
+    panel: PanelVerdict | None = None
+
+
+class PagesReport(BaseModel):
+    """Result of a standalone `asc-verify pages <metadata>` run."""
+
+    status: Literal["PASS", "WARN", "BLOCK"]
+    findings: list[PageFinding] = Field(default_factory=list)
+    pages_checked: int = 0
+    jury_used: bool = False
+
+
 class LocaleMetadata(BaseModel):
     locale: str
     app_name: str | None = None
@@ -119,3 +146,4 @@ class GateReport(BaseModel):
     guidelines_available: bool
     panels: list[PanelVerdict] = Field(default_factory=list)
     code_findings: list[CodeFinding] = Field(default_factory=list)
+    page_findings: list[PageFinding] = Field(default_factory=list)

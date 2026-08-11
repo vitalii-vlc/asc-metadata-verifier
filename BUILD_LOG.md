@@ -929,3 +929,73 @@ Built task-by-task (TDD, 11 tasks) on `feat/code-analyzer`. Full suite with the
 `uv run ruff check .` → **All checks passed!** A live end-to-end run over a
 synthetic flawed project surfaced 6 findings across 5 categories with correct
 `file:line`/evidence and a BLOCK gate (real exit code 1; clean project exit 0).
+
+## Pages analyzer (sub-project D)
+
+Fourth of five v2 sub-projects. Spec + plan pre-registered
+(`docs/superpowers/specs/2026-08-11-pages-analyzer-design.md`,
+`docs/superpowers/plans/2026-08-11-pages-analyzer.md`) before any feature code.
+Built **inline** (the 200-subagent session cap stays exhausted across the
+session, so subagent-driven fell back to controller-run TDD, as with C —
+per-task commits + a whole-branch self-review, no independent reviewer gate).
+
+### What shipped
+
+A new `asc-verify pages <metadata-source>` command (+ `verify --pages`) that
+fetches the app's declared privacy/support/marketing URLs and checks them for
+App Store rejection risk. Architecture: `pages/fetch.py` (`HttpPageFetcher` +
+`LocalPageFetcher`) → `pages/content.py` (HTML→text) → `pages/checks.py`
+(deterministic reachability) → opt-in `pages/jury.py` (`PageJury`, reuses A's
+consensus/models) cross-referencing a `DataCollectionProfile` (`pages/profile.py`)
+built from C's findings → `pages/analyzer.py` orchestrator.
+
+- **Bounded, SSRF-guarded fetch.** http(s) only; a resolved host in a
+  private/loopback/link-local/reserved range is refused; redirects followed
+  manually with each hop re-validated (hop-capped); connect/read timeout +
+  streamed response-size cap. `LocalPageFetcher` (a `pages.json` manifest via
+  `--pages-dir`) is the fully offline path used by every test.
+- **Deterministic reachability** (offline-capable): `page-unreachable` (high for
+  privacy/support, medium for marketing), `page-empty`, `page-offsite-redirect`,
+  `privacy-policy-missing`. A dead privacy/support URL is one of the most
+  reliable 5.1.1 rejections there is.
+- **Opt-in jury** (`--jury`): privacy adequacy (5.1.1), support adequacy,
+  marketing overclaim (2.3.1), and the crown-jewel **privacy↔code cross-reference**
+  (with `--code`): per policy-relevant data category the code touches, does the
+  fetched policy disclose it? Jury items tagged `source="jury"` with full votes.
+
+### Honesty invariants held
+
+- **Additive / zero new core deps.** No `pages`/`--pages` → `verify` byte-unchanged.
+  httpx was already a core dependency, so the live fetch added nothing.
+- **Opt-in network, honest about it.** `pages` hits the network by design (like
+  the guidelines fetch); `--pages-dir` is the offline path; the whole suite runs
+  offline (LocalPageFetcher / httpx.MockTransport / monkeypatched resolver /
+  FunctionModel). No test touches the network.
+- **Never fabricate.** Unreachable/empty are factual; `privacy-code-mismatch` is
+  jury-only from real fetched text, never a deterministic assertion.
+- **Curated boundary.** The cross-reference profile covers policy-relevant
+  categories only (camera/location/contacts/photos/mic/calendar/health +
+  advertising identifier) — NOT required-reason manifest categories (those are
+  PrivacyInfo.xcprivacy's concern, handled by C).
+
+### Honest open items
+
+- The **SSRF guard is resolve-then-check**, so DNS-rebinding (resolve-safe,
+  connect-unsafe) is a known residual not hardened here — documented, not
+  overclaimed.
+- The privacy↔code cross-reference is **jury-judged (soft)** and needs `--jury`
+  + `--code`; without them, `pages` is reachability-only. `verify --pages` folds
+  deterministic reachability only (no jury on that path).
+- **No crawling / link-following** (no discovering a policy from the marketing
+  site). Page-empty uses a small fixed char threshold heuristic.
+- Persisting `pages` runs via the repository (B) is not wired; `PagesReport` is
+  serializable, so it slots in later.
+
+### Verification
+
+Built task-by-task (TDD, 10 tasks) on `feat/pages-analyzer`. Full suite with the
+`[code]` extra: `uv run pytest -q` → **371 passed, 4 skipped** (3 real-model
+`ANTHROPIC_API_KEY`-gated, 1 ChromaIndex gated behind `semantic`).
+`uv run ruff check .` → **All checks passed!** A live offline end-to-end run
+(`pages --yaml … --pages-dir …`) surfaced findings across all three page types
+with correct URL/guideline/evidence and a BLOCK gate (real exit 1).

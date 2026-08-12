@@ -50,6 +50,11 @@ select = ["E", "F", "I", "UP", "B"]
 # parameter defaults (it inspects the default instance for CLI metadata);
 # bugbear's "no function calls in defaults" check doesn't fit that pattern.
 "src/asc_metadata_verifier/cli.py" = ["B008"]
+# The HTML report is a templating module: long inline HTML/SVG string literals
+# and verbatim CSS/JS are unavoidable, and wrapping them hurts fidelity and
+# readability. Line-length is not a useful signal for these two files.
+"src/asc_metadata_verifier/html_report.py" = ["E501"]
+"src/asc_metadata_verifier/html_report_assets.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

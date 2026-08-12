@@ -9,6 +9,7 @@ template."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape as _escape
 
 from asc_metadata_verifier.gate import (
     _code_level,
@@ -16,9 +17,15 @@ from asc_metadata_verifier.gate import (
     _page_level,
     _verdict_level,
 )
+from asc_metadata_verifier.html_report_assets import CSS as _CSS
+from asc_metadata_verifier.html_report_assets import JS as _JS
 from asc_metadata_verifier.models import GateReport, PanelVerdict
 
 _SEV_LABEL = {"block": "Block", "warn": "Warn"}
+
+
+def _esc(text) -> str:
+    return _escape(str(text), quote=True)
 
 
 @dataclass(frozen=True)
@@ -72,3 +79,157 @@ def _rows_from_report(report: GateReport) -> list[_Row]:
                          f"{f.page_type} · {f.url}", f.source, f.detail, f.evidence,
                          f.suggested_fix, f.panel))
     return rows
+
+
+# --- SVG icons (inline, from the approved template) ---
+_ICON_SHIELD = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+                'stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 '
+                '6 8 10 8 10Z"/></svg>')
+_STAMP_ICON = {
+    "BLOCK": ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+              'stroke-linecap="round" stroke-linejoin="round"><polygon points="7.86 2 16.14 2 22 7.86 '
+              '22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/>'
+              '<line x1="12" y1="16" x2="12.01" y2="16"/></svg>'),
+    "WARN": ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+             'stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 '
+             '3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><line x1="12" y1="9" x2="12" '
+             'y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'),
+    "PASS": ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+             'stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>'
+             '<path d="m9 11 3 3L22 4"/></svg>'),
+}
+_STAMP_CLASS = {"BLOCK": "", "WARN": "sev-warn", "PASS": "sev-pass"}
+_STAMP_EXIT = {"BLOCK": "do not submit · exit 1", "WARN": "review before submit · exit 0",
+               "PASS": "safe to submit · exit 0"}
+
+
+def _counts(rows):
+    blocking = sum(1 for r in rows if r.level == "block")
+    warnings = sum(1 for r in rows if r.level == "warn")
+    subsystems = len({r.subsystem for r in rows})
+    return blocking, warnings, subsystems
+
+
+def _passed(report):
+    if report.panels:
+        return sum(1 for p in report.panels if p.consensus.verdict == "pass")
+    return sum(1 for v in report.verdicts if v.verdict == "pass")
+
+
+def _verdict_stamp(status):
+    cls = _STAMP_CLASS.get(status, "")
+    icon = _STAMP_ICON.get(status, _STAMP_ICON["BLOCK"])
+    exit_line = _STAMP_EXIT.get(status, "")
+    return (f'<div class="stamp {cls}" role="status" aria-label="Overall gate result: {_esc(status)}">'
+            f'<div class="word">{icon}{_esc(status)}</div>'
+            f'<div class="exit">{_esc(exit_line)}</div></div>')
+
+
+def _lead(blocking, warnings):
+    if blocking:
+        s = f"<b>{blocking} blocking issue{'s' if blocking != 1 else ''}</b> would get this build rejected"
+        if warnings:
+            s += f", plus <b>{warnings} warning{'s' if warnings != 1 else ''}</b> worth fixing"
+        s += (" — spanning metadata, app code, and the linked web pages. "
+              "Each finding cites its guideline and a concrete fix.")
+    elif warnings:
+        s = (f"<b>{warnings} warning{'s' if warnings != 1 else ''}</b> worth reviewing — nothing "
+             "blocking. Each cites its guideline and a fix.")
+    else:
+        s = "No rejection risks found across metadata, code, and pages — the gate passed."
+    return f'<p style="margin:0 0 1.1rem; font-size:1rem; color:var(--text); max-width:60ch;">{s}</p>'
+
+
+def _masthead(report, app_id, locale, generated_at, fail_on, blocking, warnings):
+    meta = (f'<span><b>app</b> {_esc(app_id)}</span>'
+            f'<span><b>locale</b> {_esc(locale)}</span>'
+            f'<span><b>run</b> {_esc(generated_at)}</span>'
+            f'<span><b>fail-on</b> {_esc(fail_on)}</span>')
+    return (f'<div class="eyebrow">{_ICON_SHIELD} App Store Review Gate · asc-verify</div>'
+            f'<div class="masthead"><div class="subject"><h1>App Store submission</h1>'
+            f'<div class="meta">{meta}</div></div>{_verdict_stamp(report.status)}</div>'
+            f'{_lead(blocking, warnings)}')
+
+
+def _summary(blocking, warnings, passed, subsystems):
+    passed_label = "Passed" if passed else "Passed · no LLM"
+    p_flex = max(passed, 1)
+    return (f'<div class="summary">'
+            f'<div class="stat block"><div class="n tnum">{blocking}</div><div class="k">Blocking</div></div>'
+            f'<div class="stat warn"><div class="n tnum">{warnings}</div><div class="k">Warnings</div></div>'
+            f'<div class="stat pass"><div class="n tnum">{passed}</div><div class="k">{passed_label}</div></div>'
+            f'<div class="stat"><div class="n tnum">{subsystems}</div><div class="k">Subsystems</div></div>'
+            f'</div>'
+            f'<div class="sevbar" aria-hidden="true"><span class="b" style="flex:{blocking}"></span>'
+            f'<span class="w" style="flex:{warnings}"></span><span class="p" style="flex:{p_flex}"></span></div>')
+
+
+def _controls(blocking, warnings, total):
+    theme_icon = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+                  'stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/>'
+                  '<path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 '
+                  '1.4M19.1 4.9l-1.4 1.4"/></svg>')
+    skip_icon = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+                 'stroke-linecap="round" stroke-linejoin="round"><path d="m7 6 5 5 5-5M7 13l5 5 5-5"/></svg>')
+    return (f'<div class="controls"><div class="chips" role="group" aria-label="Filter findings by severity">'
+            f'<button class="chip" data-filter="all" aria-pressed="true">All <span class="tnum">{total}</span></button>'
+            f'<button class="chip" data-filter="block" aria-pressed="false"><span class="dot b"></span>'
+            f'Blocking <span class="tnum">{blocking}</span></button>'
+            f'<button class="chip" data-filter="warn" aria-pressed="false"><span class="dot w"></span>'
+            f'Warnings <span class="tnum">{warnings}</span></button></div><span class="spacer"></span>'
+            f'<a class="skip" href="#fix-all" aria-label="Skip findings and jump to the fix-everything prompt">'
+            f'{skip_icon} Skip to fix</a>'
+            f'<button class="toggle" id="themeBtn" aria-label="Toggle light or dark theme">{theme_icon}'
+            f'<span id="themeLbl">Theme</span></button></div>')
+
+
+_CAVEAT_ICON = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+                'stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 '
+                '3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><line x1="12" y1="9" x2="12" y2="13"/>'
+                '<line x1="12" y1="17" x2="12.01" y2="17"/></svg>')
+
+
+def _footer(report, app_id, locale, generated_at):
+    if report.guidelines_available:
+        gl = ("Guideline references were resolved against the live App Store Review Guidelines fetched "
+              "at run time. When the fetch fails, refs read <code>n/a</code> rather than being invented.")
+    else:
+        gl = ("Guidelines were unavailable this run (offline) — guideline references read <code>n/a</code> "
+              "and were not invented.")
+    gen = (f"Generated by asc-verify · Pydantic-stack LLM-as-judge gate · app {_esc(app_id)} · "
+           f"{_esc(locale)} · {_esc(generated_at)}")
+    return (f'<footer><div class="caveats">'
+            f'<div class="caveat">{_CAVEAT_ICON}<span>Jury findings are LLM judgments (shown with every '
+            f'vote), not deterministic facts. The static rule catalog and denylists are curated and '
+            f'non-exhaustive — treat this as a strong pre-submission signal, not a guarantee of approval.'
+            f'</span></div>'
+            f'<div class="caveat">{_CAVEAT_ICON}<span>{gl}</span></div></div>'
+            f'<div class="gen">{gen}</div></footer>')
+
+
+def _render_groups(rows):  # replaced in Task 3
+    return ""
+
+
+def _master_prompt(rows):  # replaced in Task 4
+    return ""
+
+
+def render_html(report, *, app_id="—", locale="—", generated_at="—", fail_on="fail"):
+    rows = _rows_from_report(report)
+    blocking, warnings, subsystems = _counts(rows)
+    passed = _passed(report)
+    total = blocking + warnings
+    parts = [
+        "<style>", _CSS, "</style>",
+        '<div class="wrap">',
+        _masthead(report, app_id, locale, generated_at, fail_on, blocking, warnings),
+        _summary(blocking, warnings, passed, subsystems),
+        _controls(blocking, warnings, total),
+        _render_groups(rows),
+        _master_prompt(rows),
+        _footer(report, app_id, locale, generated_at),
+        "</div>",
+        "<script>", _JS, "</script>",
+    ]
+    return "\n".join(parts)

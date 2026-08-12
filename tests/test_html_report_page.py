@@ -33,3 +33,9 @@ def test_render_is_deterministic():
     a = render_html(_report(), generated_at="t")
     b = render_html(_report(), generated_at="t")
     assert a == b
+
+
+def test_pass_report_renders_clean_no_fix_prompt():
+    html = render_html(GateReport(status="PASS", guidelines_available=True))
+    assert "PASS" in html and "sev-pass" in html and "gate passed" in html
+    assert 'id="fix-all"' not in html  # nothing to fix -> no master prompt

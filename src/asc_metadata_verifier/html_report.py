@@ -284,8 +284,29 @@ def _finding_card(row):
             f'{_evidence_block(row)}{fix}{_jury_panel(row.panel)}</article>')
 
 
-def _fix_prompt(subsystem, rows):  # replaced in Task 4
-    return ""
+_WAND = ('<svg class="wand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+         'stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2M15 16v-2M8 9h2M20 9h2'
+         'M17.8 11.8 19 13M15 9h0M17.8 6.2 19 5M3 21l9-9M12.2 6.2 11 5"/></svg>')
+_COPY_BTN = ('<button class="copy-prompt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+             'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" '
+             'height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
+             '<span class="lbl">Copy prompt</span></button>')
+
+
+def _prompt_line(row):
+    loc = f" — {row.anchor}" if row.anchor else ""
+    gl = f" ({row.guideline_ref})" if row.guideline_ref else ""
+    fix = row.suggested_fix or row.rationale
+    return f"[{row.level.upper()}] {row.rule_label}{gl}{loc}\n   {fix}"
+
+
+def _fix_prompt(subsystem, rows):
+    body = "\n\n".join(_prompt_line(r) for r in rows)
+    intro = (f"Fix these App Store rejection risks in the {subsystem.lower()} layer. "
+             "Make the minimal change for each, preserve behavior, and show a diff.")
+    text = _esc(f"{intro}\n\n{body}")
+    return (f'<div class="promptbox"><div class="phead">{_WAND}<b>Fix prompt</b> · {subsystem}'
+            f'<span class="spacer"></span>{_COPY_BTN}</div><pre class="ptext">{text}</pre></div>')
 
 
 def _render_groups(rows):
@@ -302,8 +323,28 @@ def _render_groups(rows):
     return "\n".join(out)
 
 
-def _master_prompt(rows):  # replaced in Task 4
-    return ""
+def _master_prompt(rows):
+    if not rows:
+        return ""
+    total = len(rows)
+    blocking = sum(1 for r in rows if r.level == "block")
+    warnings = total - blocking
+    sections = []
+    for name in ("Metadata", "Code", "Pages"):
+        group = [r for r in rows if r.subsystem == name]
+        if group:
+            sections.append(name.upper() + "\n" + "\n\n".join(_prompt_line(r) for r in group))
+    body = "\n\n".join(sections)
+    intro = (f"You are helping ship an iOS app past App Store review. asc-verify returned a gate with "
+             f"{blocking} blocking and {warnings} warning issue(s) across metadata, app code, and web "
+             "pages. Fix ALL of them so a re-run returns no BLOCK. For each I give the rule, the App "
+             "Store guideline, and the exact location. Make minimal changes, preserve behavior, and show "
+             "a diff for every change. When finished, summarize what changed per file.")
+    text = _esc(f"{intro}\n\n{body}")
+    return (f'<div class="promptbox master" id="fix-all"><div class="phead">{_WAND}'
+            f'<b>Fix everything</b> · one prompt for all {total} issue(s)<span class="spacer"></span>'
+            f'{_COPY_BTN}</div><p class="master-lead">Paste this into your coding agent to remediate the '
+            f'whole report in one pass.</p><pre class="ptext">{text}</pre></div>')
 
 
 def render_html(report, *, app_id="—", locale="—", generated_at="—", fail_on="fail"):

@@ -207,8 +207,99 @@ def _footer(report, app_id, locale, generated_at):
             f'<div class="gen">{gen}</div></footer>')
 
 
-def _render_groups(rows):  # replaced in Task 3
+_SEV_ICON = {
+    "block": ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">'
+              '<polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/></svg>'),
+    "warn": ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" '
+             'stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 '
+             '3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>'),
+}
+_GROUP_META = [
+    ("Metadata",
+     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+     'stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h6M7 16h8"/></svg>',
+     "App Store Connect text — judged against the live Review Guidelines."),
+    ("Code",
+     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+     'stroke-linejoin="round"><path d="m16 18 4-4-4-4M8 6l-4 4 4 4M14 4l-4 16"/></svg>',
+     "Deep AST analysis of the app project — symbols correlated against Info.plist & PrivacyInfo.xcprivacy."),
+    ("Pages",
+     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+     'stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></svg>',
+     "Privacy / support / marketing URLs — reachability + privacy-policy↔code cross-reference."),
+]
+_CHEV = ('<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" '
+         'stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>')
+_CHECK = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+          'stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>')
+
+
+def _evidence_block(row):
+    if not row.evidence:
+        return ""
+    return ('<div class="diff" aria-label="Offending value">'
+            f'<div class="row del"><span class="g">-</span><span class="l">{_esc(row.evidence)}</span></div>'
+            '</div>')
+
+
+def _jury_panel(panel):
+    if panel is None:
+        return ""
+    votes = []
+    for vote in panel.votes:
+        if vote.status == "voted" and vote.verdict is not None:
+            detail = f"{_esc(vote.verdict.severity)} · conf {vote.verdict.confidence:.2f}"
+            votes.append(f'<div class="vote"><span class="j">{_esc(vote.judge)}</span>'
+                         f'<span class="v {_esc(vote.verdict.verdict)}">{_esc(vote.verdict.verdict)}</span>'
+                         f'<span class="c">{detail}</span></div>')
+        else:
+            votes.append(f'<div class="vote"><span class="j">{_esc(vote.judge)}</span>'
+                         f'<span class="v">{_esc(vote.status)}</span>'
+                         f'<span class="c">{_esc(vote.error or "")}</span></div>')
+    agr = "—" if panel.agreement is None else f"{panel.agreement:.2f}"
+    cons = (f'<div class="consensus"><span><b>consensus</b> {_esc(panel.consensus.verdict)} / '
+            f'{_esc(panel.consensus.severity)}</span><span><b>agreement</b> {agr}</span>'
+            f'<span><b>policy</b> {_esc(panel.policy)}</span></div>')
+    return (f'<details class="jury"><summary>{_CHEV}Jury deliberation — consensus '
+            f'<b>{_esc(panel.consensus.verdict)}</b> (policy: {_esc(panel.policy)})</summary>'
+            f'<div class="votes">{"".join(votes)}{cons}</div></details>')
+
+
+def _finding_card(row):
+    card_cls = "card" if row.level == "block" else "card sev-warn"
+    guideline = _esc(row.guideline_ref) if row.guideline_ref else "n/a"
+    src_cls = "src jury" if row.source == "jury" else "src"
+    src_label = "jury" if row.source == "jury" else "static"
+    fix = ""
+    if row.suggested_fix:
+        fix = (f'<div class="fix">{_CHECK}<div><span class="k">Fix</span><br>'
+               f'{_esc(row.suggested_fix)}</div></div>')
+    return (f'<article class="{card_cls}" data-sev="{row.level}">'
+            f'<div class="fhead"><span class="sev">{_SEV_ICON[row.level]}{row.sev_label}</span>'
+            f'<span class="rule">{_esc(row.rule_label)}</span>'
+            f'<span class="pill">{guideline}</span>'
+            f'<span class="anchor">{_esc(row.anchor)}</span>'
+            f'<span class="spacer"></span><span class="{src_cls}">{src_label}</span></div>'
+            f'<p class="rationale">{_esc(row.rationale)}</p>'
+            f'{_evidence_block(row)}{fix}{_jury_panel(row.panel)}</article>')
+
+
+def _fix_prompt(subsystem, rows):  # replaced in Task 4
     return ""
+
+
+def _render_groups(rows):
+    out = []
+    for name, icon, sub in _GROUP_META:
+        group_rows = [r for r in rows if r.subsystem == name]
+        if not group_rows:
+            continue
+        cards = "".join(_finding_card(r) for r in group_rows)
+        out.append(f'<section class="group" data-group><h2>{icon} {name} '
+                   f'<span class="count">{len(group_rows)}</span></h2>'
+                   f'<p class="gsub">{sub}</p><div class="cards">{cards}</div>'
+                   f'{_fix_prompt(name, group_rows)}</section>')
+    return "\n".join(out)
 
 
 def _master_prompt(rows):  # replaced in Task 4

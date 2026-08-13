@@ -70,7 +70,7 @@ asc-verify ./fastlane --dry-run       # deterministic checks + gate only — ful
 | `--asc-api-key-id <id>` | ASC API key id (from the `.p8` key). |
 | `--asc-api-issuer-id <id>` | ASC API issuer id. |
 | `--asc-api-key <path>` | Path to the ASC API private key (`.p8` file — never committed; `.gitignore` blocks `*.p8`). |
-| `--format {md,json}` | Report format (default `md`). `json` is raw stdout. |
+| `--format {md,json,html}` | Report format (default `md`). `json` is raw stdout; `html` is a self-contained report (see below). |
 | `--fail-on {warn,fail}` | Gate threshold: block on any `fail` (default) or already on `warn`. |
 | `--guidelines <path>` | Local offline copy of the guidelines; skips the live fetch. |
 | `--dry-run` | Deterministic checks + gate only — no guidelines fetch, no judge, fully offline. |
@@ -267,6 +267,20 @@ The fetcher is **bounded and SSRF-guarded**: http(s) only, a resolved host in a 
 
 > **Honest status & boundary.** `pages` **does** use the network by design (it fetches live pages) — `--pages-dir` (a `pages.json` manifest of saved HTML) gives a fully offline path, and the whole test suite runs offline via a local fetcher / mocked transport. **Zero new core deps** (httpx is already present). The SSRF guard is **resolve-then-check**, so **DNS-rebinding is a known residual** not hardened in this build. The cross-reference is **jury-judged** (soft, LLM opinion, never asserted as deterministic fact) and needs `--jury` + `--code`; without them, `pages` is reachability-only. It does **not** crawl or follow links, and `pages` runs are not yet persisted.
 
+## HTML report (optional)
+
+Any command takes `--format html` to render a **self-contained, shareable HTML report** instead of markdown/JSON:
+
+```bash
+asc-verify verify ./fastlane --format html > report.html          # unified report
+asc-verify code ./MyApp --format html > code-report.html
+asc-verify pages --yaml metadata.yaml --format html > pages.html
+```
+
+The report leads with a **stamped PASS / WARN / BLOCK verdict**, a severity summary + filter, then findings grouped by subsystem (Metadata / Code / Pages) — each with its guideline reference, the **actual offending value**, and a concrete fix. Jury findings expand to show **every judge's vote** (consensus, agreement, policy). It closes with a **copy-ready fix prompt per section** and one master **"fix everything"** prompt you can paste into a coding agent, plus a **Skip-to-fix** shortcut and a light/dark theme toggle. One file, no assets — open it anywhere or send it to someone.
+
+> **Honest status & boundary.** The report renders **only what the models produced**: the "offending value" is the finding's real evidence/quote (a red highlight — **never a fabricated before/after rewrite**, since the rules carry no replacement string), fix prompts are built from real fields only, every model string is HTML-escaped, and a missing guideline reference reads `n/a` — never invented. Output is **deterministic** (identical report → byte-identical HTML) and **offline** with **zero new core deps** (pure string building). Fonts are deliberate system stacks — a monospace for machine facts, a humanist sans for prose; the file isn't CSP-bound, so a future build could embed JetBrains Mono / IBM Plex Sans. HTML runs are not yet persisted.
+
 ## The eval-science backbone
 
 The judge is **measured, not asserted.** A curated golden dataset of **44 labeled cases** with **multi-label ground truth** (`src/asc_metadata_verifier/evals/golden/cases.jsonl` — 30 positives across all 8 rubric dimensions + 14 clean controls engineered to stress false positives) runs through a **pydantic-evals** meta-eval (`src/asc_metadata_verifier/evals/meta_eval.py`) that computes per-dimension precision/recall and overall accuracy over a full 44×8 one-vs-rest grid, plus a failure taxonomy (`false_negative` / `false_positive` / `wrong_dimension` / `wrong_severity`). Multi-label ground truth means a case that legitimately trips two dimensions (e.g. a keyword list that both stuffs keywords *and* names a competitor's trademark) isn't scored as a judge false positive. `BUILD_LOG.md` records the pre-registered methodology and the honest status of the real-model run (not yet executed — no key in the dev environment; no numbers fabricated).
@@ -279,7 +293,7 @@ The package ships an `app-store-review-gate` skill (`src/asc_metadata_verifier/.
 
 ```bash
 uv sync --extra code   # `--extra code` adds the tree-sitter grammars the code analyzer needs
-uv run pytest          # 371 passed, 4 skipped with the [code] extra installed. The 4 skips: 3 real-model
+uv run pytest          # 389 passed, 4 skipped with the [code] extra installed. The 4 skips: 3 real-model
                         # tests gated behind ANTHROPIC_API_KEY, 1 ChromaIndex test gated behind the
                         # `semantic` extra. Without `--extra code`, the tree-sitter-backed code tests
                         # (parser + code CLI) additionally skip via pytest.importorskip.

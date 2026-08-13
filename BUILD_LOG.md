@@ -994,8 +994,75 @@ built from C's findings → `pages/analyzer.py` orchestrator.
 ### Verification
 
 Built task-by-task (TDD, 10 tasks) on `feat/pages-analyzer`. Full suite with the
-`[code]` extra: `uv run pytest -q` → **371 passed, 4 skipped** (3 real-model
+`[code]` extra: `uv run pytest -q` → **389 passed, 4 skipped** (3 real-model
 `ANTHROPIC_API_KEY`-gated, 1 ChromaIndex gated behind `semantic`).
 `uv run ruff check .` → **All checks passed!** A live offline end-to-end run
 (`pages --yaml … --pages-dir …`) surfaced findings across all three page types
 with correct URL/guideline/evidence and a BLOCK gate (real exit 1).
+
+## HTML report generator (sub-project E)
+
+Fifth and **final** v2 sub-project. Spec + plan pre-registered
+(`docs/superpowers/specs/2026-08-12-html-report-design.md`,
+`docs/superpowers/plans/2026-08-12-html-report.md`) before any feature code.
+The **visual design was approved first** (a published template Artifact); this
+build settled the data→HTML mapping and the honesty rules. Built **inline**
+(the 200-subagent session cap stayed exhausted across the session, same as C/D):
+controller-run TDD, 6 tasks, per-task commits + a whole-branch self-review.
+
+### What shipped
+
+`--format html` on `verify`/`code`/`pages` renders a **self-contained, offline,
+deterministic** HTML report matching the approved template: a stamped
+PASS/WARN/BLOCK verdict, severity summary + filter, findings grouped by subsystem
+(Metadata/Code/Pages) with evidence + guideline + fix, expandable jury vote
+panels, a copy-ready **fix prompt per section** + a master **fix-everything**
+prompt, skip-to-fix, and a light/dark theme toggle. One `render_html(GateReport,
+…)` serves all three commands (`code`/`pages` wrap their findings into a
+`GateReport` via `evaluate`). A `_Row` normalizer collapses the four finding types
+(RubricVerdict/PanelVerdict, DeterministicFinding, CodeFinding, PageFinding) into
+one shape. CSS/JS are ported verbatim into `html_report_assets.py`.
+
+### Honesty rules held (the reason this sub-project needed a spec, not just the template)
+
+- **No fabricated before/after diffs.** The template's illustrative green "+"
+  rewrites were dropped: the generator renders an **evidence highlight** (a red
+  line of the *actual* offending value) + the finding's own prose fix. No green
+  addition line is emitted unless a finding carries a concrete replacement — none
+  do, so that branch is a dormant seam. A test asserts `class="row add"` never
+  appears for a prose-only fix.
+- **Prompts from real fields only** — `[LEVEL] rule (guideline_ref) — anchor` +
+  `suggested_fix` (or `detail` when absent). No invented specifics.
+- **Everything model-derived is `html.escape`d** — a `<script>` payload test
+  proves it renders escaped.
+- **`guideline_ref == None` → `n/a`**, never invented.
+- **Jury panels show real votes** (including error/abstain) + consensus + agreement
+  + policy.
+- **Deterministic** — no time/randomness in `render_html` (the CLI stamps the
+  timestamp); identical report → byte-identical HTML.
+
+### Honesty invariants held
+
+- **Additive / offline / zero new core deps.** `--format md`/`json` byte-unchanged;
+  the renderer is pure string building; the page inlines all CSS/JS, uses
+  system-font stacks (no external fonts/CDN/network), and opens from `file://`.
+
+### Honest open items
+
+- Evidence-only diffs: no structured `replacement` field yet, so no true
+  before/after (the seam exists in `_evidence_block`).
+- System fonts, not embedded webfonts (a real build could bundle JetBrains Mono /
+  IBM Plex Sans since the file isn't CSP-bound).
+- HTML runs are not persisted via the repository (B).
+- A per-file `E501` ruff ignore was added for the two template-heavy modules
+  (`html_report.py`, `html_report_assets.py`) — long inline HTML/SVG/CSS literals;
+  precedent: the existing `cli.py` `B008` ignore.
+
+### Verification
+
+Built task-by-task (TDD, 6 tasks) on `feat/html-report`. Full suite:
+`uv run pytest -q` → **389 passed, 4 skipped**. `uv run ruff check .` →
+**All checks passed!** A live end-to-end run
+(`verify … --dry-run --format html`) produced a 27 KB well-formed report
+(parsed by `html.parser`, all structural tokens present, finding cards +
+fix prompts rendered).

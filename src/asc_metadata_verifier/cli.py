@@ -34,6 +34,7 @@ from typer.core import TyperGroup
 from asc_metadata_verifier.checks.deterministic import run_deterministic
 from asc_metadata_verifier.gate import evaluate
 from asc_metadata_verifier.guidelines.source import Guidelines, get_guidelines
+from asc_metadata_verifier.html_report import render_html
 from asc_metadata_verifier.ingest.asc_api import AscApiAdapter
 from asc_metadata_verifier.ingest.base import IngestError
 from asc_metadata_verifier.ingest.fastlane import FastlaneAdapter
@@ -132,6 +133,7 @@ _semantic_index: SemanticIndex | None = None
 class OutputFormat(StrEnum):
     md = "md"
     json = "json"
+    html = "html"
 
 
 class FailOn(StrEnum):
@@ -642,7 +644,12 @@ def verify(
             page_findings=page_findings,
         )
 
-    if output_format is OutputFormat.json:
+    if output_format is OutputFormat.html:
+        stamped = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        typer.echo(render_html(report, app_id=meta.app_id or "—",
+                               locale=meta.primary_locale or "—", generated_at=stamped,
+                               fail_on=fail_on.value))
+    elif output_format is OutputFormat.json:
         # Raw JSON only on stdout (no rich decoration) so it stays pipeable/parseable.
         typer.echo(render_json(report))
     else:
@@ -771,7 +778,11 @@ def code(
         findings, analyzed_files=analyzed, backend=backend_name,
         fail_on=fail_on.value, jury_used=jury_used,
     )
-    if output_format is OutputFormat.json:
+    if output_format is OutputFormat.html:
+        stamped = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        gate_report = evaluate([], [], fail_on=fail_on.value, code_findings=findings)
+        typer.echo(render_html(gate_report, generated_at=stamped, fail_on=fail_on.value))
+    elif output_format is OutputFormat.json:
         typer.echo(render_code_report_json(report))
     else:
         typer.echo(render_code_report_text(report))
@@ -861,7 +872,11 @@ def pages(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2) from None
     report = build_pages_report(findings, pages_checked, fail_on=fail_on.value, jury_used=jury_used)
-    if output_format is OutputFormat.json:
+    if output_format is OutputFormat.html:
+        stamped = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        gate_report = evaluate([], [], fail_on=fail_on.value, page_findings=findings)
+        typer.echo(render_html(gate_report, generated_at=stamped, fail_on=fail_on.value))
+    elif output_format is OutputFormat.json:
         typer.echo(render_pages_report_json(report))
     else:
         typer.echo(render_pages_report_text(report))

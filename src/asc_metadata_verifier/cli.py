@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import click
 import typer
+from dotenv import find_dotenv, load_dotenv
 from typer.core import TyperGroup
 
 from asc_metadata_verifier.checks.deterministic import run_deterministic
@@ -1001,3 +1002,24 @@ def similar(
 
     hits = _semantic_index.query(text, k=k)
     typer.echo(json.dumps(hits, indent=2))
+
+
+def _load_env() -> None:
+    """Load a `.env` (from the cwd or a parent) into the process environment.
+
+    Runs before any command reads the environment, so secrets like
+    `ANTHROPIC_API_KEY` / `LOGFIRE_TOKEN` and settings like `ASC_JUDGE_MODEL`
+    can live in a `.env` file instead of the shell. `override=False` keeps a
+    value already present in the real environment ahead of the `.env` file.
+
+    Called only from `main()` (the console-script entry point), never at
+    import time -- so importing this module in-process (e.g. the CliRunner
+    tests) never picks up an ambient `.env`.
+    """
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+
+
+def main() -> None:
+    """Console-script entry point for `asc-verify`: load `.env`, then run the CLI."""
+    _load_env()
+    app()

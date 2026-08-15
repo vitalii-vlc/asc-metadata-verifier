@@ -78,6 +78,8 @@ asc-verify ./fastlane --dry-run       # deterministic checks + gate only — ful
 
 The **text judge** runs only when `ANTHROPIC_API_KEY` is set (or a model is injected programmatically) and `--dry-run` is not passed; otherwise the CLI still runs deterministic checks + the gate and prints `LLM checks skipped (no ANTHROPIC_API_KEY)`. The **vision judge** additionally requires `--no-vision` to be unset and at least one screenshot present; its verdicts merge into the same gate.
 
+`asc-verify` loads a `.env` file from the working directory (or a parent) at startup, so `ANTHROPIC_API_KEY` — and optional `ASC_JUDGE_MODEL` / `LOGFIRE_TOKEN` — can live there instead of the shell. A real environment variable still takes precedence over `.env`. Keep `.env` git-ignored; it holds a secret. (The `--asc-api-*` credentials are CLI flags, not read from `.env`.)
+
 Exit code is `1` on `BLOCK`, `0` otherwise — so it gates a fastlane pipeline. Run `logfire auth` to see the full source→gate trace.
 
 ### Example

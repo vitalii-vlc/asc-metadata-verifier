@@ -22,6 +22,58 @@ app would get rejected.
 - After editing fastlane `deliver` metadata or a metadata YAML/JSON file, to
   confirm the edit didn't introduce a new BLOCK/WARN finding.
 
+## Step 0: Ensure `asc-verify` is installed and configured
+
+Before anything else, make the tool runnable. Skip whichever part is already
+satisfied.
+
+**Install the CLI if it's missing.** Check for it, and if absent install it as
+a standalone tool (keeps the user's own project dependencies untouched — the
+user's project may not even be Python):
+
+```bash
+command -v asc-verify >/dev/null 2>&1 || uv tool install asc-metadata-verifier
+# no uv? use: pipx install asc-metadata-verifier
+```
+
+Report what you did. Only install into the user's project (`uv add
+asc-metadata-verifier` / `pip install asc-metadata-verifier`) if they
+explicitly want it as a project dependency.
+
+**Configure the API key via a `.env` file.** The LLM judge reads
+`ANTHROPIC_API_KEY` from the environment, and `asc-verify` loads a `.env`
+file from the working directory (or a parent) automatically, so the key can
+live there instead of the shell. A real environment variable still wins over
+`.env`.
+
+If `ANTHROPIC_API_KEY` isn't already set, suggest the user create a `.env`
+in the project root — do **not** ask them to paste the key to you, and never
+print, echo, or commit a key value:
+
+```dotenv
+# .env  (add this file to .gitignore — it holds a secret)
+ANTHROPIC_API_KEY=sk-ant-...
+# optional:
+# ASC_JUDGE_MODEL=claude-opus-4-8   # override the judge model
+# LOGFIRE_TOKEN=...                 # optional tracing; omit to disable
+```
+
+Then ensure `.env` is git-ignored:
+
+```bash
+grep -qxF '.env' .gitignore 2>/dev/null || echo '.env' >> .gitignore
+```
+
+Without `ANTHROPIC_API_KEY`, `asc-verify` still runs but performs **only
+deterministic checks** (character limits, required fields, placeholder/URL
+regexes) — no LLM rejection-risk judgment. Say so explicitly when presenting
+results in that case (see Step 3).
+
+Note: the App Store Connect **API** credentials (`--asc-api-key-id`,
+`--asc-api-issuer-id`, `--asc-api-private-key`) are passed as CLI flags, not
+read from `.env`; the `.p8` private key stays a file referenced by path —
+never inline its contents.
+
 ## Step 1: Identify the input
 
 The app's metadata is either:
@@ -137,5 +189,5 @@ For each item, show:
 
 If this skill was installed manually rather than via `uvx library-skills`,
 behavior is identical — it only depends on `asc-verify` being installed and
-on `$PATH` (`uv add asc-metadata-verifier`, or `pip install
-asc-metadata-verifier`).
+on `$PATH`. Install it as in Step 0 (`uv tool install asc-metadata-verifier`,
+or `pipx install asc-metadata-verifier`).

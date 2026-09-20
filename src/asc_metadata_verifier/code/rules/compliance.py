@@ -8,7 +8,10 @@ from asc_metadata_verifier.code.parser import ASTIndex
 from asc_metadata_verifier.code.project import ProjectModel
 from asc_metadata_verifier.models import CodeFinding
 
-_SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*):")
+# Requires the "://" separator: a bare "word:" prefix matches ordinary prose
+# such as a log tag ("AudioService: ready") or a test name ("RULE: ..."), which
+# are not URLs and must not be reported as undeclared query schemes.
+_SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.\-]*)://")
 _COMMON_SCHEMES = {"http", "https", "file", "mailto", "tel"}
 
 

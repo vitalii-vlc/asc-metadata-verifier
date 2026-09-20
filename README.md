@@ -8,6 +8,27 @@ Built on the Pydantic tooling stack: **pydantic-ai** (the judge) · **pydantic-e
 >
 > **Honestly unvalidated:** the ASC-API adapter is tested only against **mocked `httpx`** (no live App Store Connect credentials were used), and the vision judge is tested only against a **`FunctionModel` stub** (no real-model vision run). Per the honesty bar, no accuracy numbers are claimed that weren't measured.
 
+## Contents
+
+- [Why](#why)
+- [How it works](#how-it-works)
+- [What it checks](#what-it-checks)
+- [Install](#install)
+  - [With Claude Code](#with-claude-code)
+  - [Manually](#manually)
+- [Usage](#usage)
+  - [Tracing](#tracing)
+  - [Example](#example)
+- [Multi-LLM jury (optional)](#multi-llm-jury-optional)
+- [Persistence (optional)](#persistence-optional)
+- [Code analysis (optional)](#code-analysis-optional)
+- [Pages analysis (optional)](#pages-analysis-optional)
+- [HTML report (optional)](#html-report-optional)
+- [The eval-science backbone](#the-eval-science-backbone)
+- [The bundled Claude skill](#the-bundled-claude-skill)
+- [Development](#development)
+- [License](#license)
+
 ## Why
 
 App Store metadata rejections cost days: you submit, wait for review, get rejected for something a checklist could have caught (an Android mention in the description, a price in the wrong field, placeholder text that shipped by accident), fix it, and re-queue. This gates that class of problem *before* submission — and does it where a regex can't: judging phrasing, claims, and screenshots against the *current* guidelines.
@@ -122,7 +143,7 @@ The **text judge** runs only when `ANTHROPIC_API_KEY` is set (or a model is inje
 
 Exit code is `1` on `BLOCK`, `0` otherwise — so it gates a fastlane pipeline. Run `logfire auth` to see the full source→gate trace.
 
-#### Tracing
+### Tracing
 
 One run is one trace: a `verify` root span over `metadata` (with `ingest` / `deterministic` / `guidelines` / `judge` / `vision` / `gate` beneath it), plus `code` and `pages` when those stages are enabled. Configuration is idempotent, so composing commands never discards an in-flight span.
 

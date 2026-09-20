@@ -16,6 +16,17 @@ _FIELD_FILES = {
     "privacy_url.txt": "privacy_url",
 }
 
+# Directories fastlane `deliver` reserves under `metadata/` for App Review
+# contact details. They sit next to the locale dirs but are not locales.
+_RESERVED_DIRS = {
+    "review_information",
+    "trade_representative_contact_information",
+}
+
+# What `deliver` will actually upload as a screenshot. Anything else in the
+# directory (README.md, .DS_Store) is housekeeping, not an asset.
+_SCREENSHOT_SUFFIXES = {".png", ".jpg", ".jpeg"}
+
 
 class FastlaneAdapter:
     """Ingest adapter for a fastlane `deliver` root directory.
@@ -45,7 +56,10 @@ class FastlaneAdapter:
                 "expected per-locale subdirectories"
             )
 
-        locale_dirs = sorted(p for p in metadata_dir.iterdir() if p.is_dir())
+        locale_dirs = sorted(
+            p for p in metadata_dir.iterdir()
+            if p.is_dir() and p.name not in _RESERVED_DIRS
+        )
         if not locale_dirs:
             raise IngestError(
                 f"No fastlane metadata found at {metadata_dir} — "
@@ -80,5 +94,5 @@ class FastlaneAdapter:
         return [
             Screenshot(locale=locale, path=str(p))
             for p in sorted(screenshots_dir.iterdir())
-            if p.is_file()
+            if p.is_file() and p.suffix.lower() in _SCREENSHOT_SUFFIXES
         ]

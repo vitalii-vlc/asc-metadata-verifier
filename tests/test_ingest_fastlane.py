@@ -89,3 +89,48 @@ def test_non_utf8_field_file_raises_actionable_ingest_error_not_raw_decode_error
     message = str(exc_info.value)
     assert "name.txt" in message
     assert "utf-8" in message.lower()
+
+
+def test_reserved_non_locale_dirs_are_not_ingested_as_locales(tmp_path):
+    # fastlane `deliver` reserves these two directories under metadata/ for
+    # App Review contact details -- they are not locales, and treating them as
+    # such invents "required field is empty" findings for every app that
+    # fills in its review information.
+    root = tmp_path / "deliver_root"
+    (root / "metadata" / "en-US").mkdir(parents=True)
+    (root / "metadata" / "en-US" / "name.txt").write_text("Sunrise Tasks")
+    for reserved in ("review_information", "trade_representative_contact_information"):
+        reserved_dir = root / "metadata" / reserved
+        reserved_dir.mkdir()
+        (reserved_dir / "first_name.txt").write_text("Ada")
+
+    metadata = FastlaneAdapter(root).load()
+
+    assert [locale.locale for locale in metadata.locales] == ["en-US"]
+
+
+def test_metadata_dir_with_only_reserved_dirs_raises_ingest_error(tmp_path):
+    root = tmp_path / "deliver_root"
+    (root / "metadata" / "review_information").mkdir(parents=True)
+
+    with pytest.raises(IngestError):
+        FastlaneAdapter(root).load()
+
+
+def test_load_ignores_non_image_files_in_screenshots_dir(tmp_path):
+    # fastlane screenshot dirs routinely carry a README.md or .DS_Store; they
+    # are not screenshots, and handing them to the vision judge just produces
+    # "not a decodable image" noise.
+    root = tmp_path / "deliver_root"
+    (root / "metadata" / "en-US").mkdir(parents=True)
+    (root / "metadata" / "en-US" / "name.txt").write_text("Sunrise Tasks")
+    shots = root / "screenshots" / "en-US"
+    shots.mkdir(parents=True)
+    (shots / "shot1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (shots / "shot2.JPG").write_bytes(b"\xff\xd8\xff")
+    (shots / "README.md").write_text("Drop screenshots here.")
+    (shots / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+
+    metadata = FastlaneAdapter(root).load()
+
+    assert {Path(s.path).name for s in metadata.screenshots} == {"shot1.png", "shot2.JPG"}

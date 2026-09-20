@@ -277,7 +277,7 @@ def run_verify(
         )
 
     configure_logfire()
-    with span("verify"):
+    with span("metadata"):
         asc_api_fields = {
             "--asc-api-app-id": asc_api_app_id,
             "--asc-api-key-id": asc_api_key_id,
@@ -580,70 +580,81 @@ def verify(
 
     verdict_cache = VerdictCache(repo) if (repo is not None and cache) else None
 
-    try:
-        report, llm_skipped, meta, guidelines = run_verify(
-            path=path,
-            yaml_path=yaml_path,
-            asc_api_app_id=asc_api_app_id,
-            asc_api_key_id=asc_api_key_id,
-            asc_api_issuer_id=asc_api_issuer_id,
-            asc_api_key=asc_api_key,
-            no_vision=no_vision,
-            fail_on=fail_on.value,
-            guidelines_path=guidelines_path,
-            dry_run=dry_run,
-            judges_path=judges_path,
-            judge_cli=judge_cli,
-            consensus=consensus,
-            max_concurrency=max_concurrency,
-            cache=verdict_cache,
-        )
-    except IngestError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=2) from None
-    except JudgeConfigError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=2) from None
-    except (FileNotFoundError, OSError, ValueError):
-        # `get_guidelines(override_path=...)` raises FileNotFoundError/OSError
-        # for a missing/unreadable --guidelines override file, and ValueError
-        # for an invalid session id -- neither is an IngestError, so without
-        # this handler a bad --guidelines path leaks a raw traceback instead
-        # of the actionable "no tracebacks" message the rest of the CLI gives.
-        typer.echo(f"Error: guidelines file not found: {guidelines_path}", err=True)
-        raise typer.Exit(code=2) from None
+    # One trace per run: the metadata pass, the code analyzer and the page
+    # fetches are stages of the same pipeline, so they belong under one root
+    # span. `configure_logfire()` is idempotent, so `run_verify` calling it
+    # again inside this span does not discard the trace.
+    configure_logfire()
+    with span("verify"):
+        try:
+            report, llm_skipped, meta, guidelines = run_verify(
+                path=path,
+                yaml_path=yaml_path,
+                asc_api_app_id=asc_api_app_id,
+                asc_api_key_id=asc_api_key_id,
+                asc_api_issuer_id=asc_api_issuer_id,
+                asc_api_key=asc_api_key,
+                no_vision=no_vision,
+                fail_on=fail_on.value,
+                guidelines_path=guidelines_path,
+                dry_run=dry_run,
+                judges_path=judges_path,
+                judge_cli=judge_cli,
+                consensus=consensus,
+                max_concurrency=max_concurrency,
+                cache=verdict_cache,
+            )
+        except IngestError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2) from None
+        except JudgeConfigError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2) from None
+        except (FileNotFoundError, OSError, ValueError):
+            # `get_guidelines(override_path=...)` raises FileNotFoundError/OSError
+            # for a missing/unreadable --guidelines override file, and ValueError
+            # for an invalid session id -- neither is an IngestError, so without
+            # this handler a bad --guidelines path leaks a raw traceback instead
+            # of the actionable "no tracebacks" message the rest of the CLI gives.
+            typer.echo(f"Error: guidelines file not found: {guidelines_path}", err=True)
+            raise typer.Exit(code=2) from None
 
-    if code_path is not None:
-        code_findings, _backend, _n, _proj, _asts = _analyze_project(code_path, "auto", None)
-        # Rebuild the gate with the SAME verdicts/findings/panels, now folding
-        # code findings in, so status + exit code cover metadata AND code.
-        report = evaluate(
-            report.verdicts,
-            report.deterministic_findings,
-            fail_on=fail_on.value,
-            guidelines_available=report.guidelines_available,
-            panels=report.panels,
-            code_findings=code_findings,
-        )
+        if code_path is not None:
+            with span("code"):
+                code_findings, _backend, _n, _proj, _asts = _analyze_project(
+                    code_path, "auto", None
+                )
+            # Rebuild the gate with the SAME verdicts/findings/panels, now folding
+            # code findings in, so status + exit code cover metadata AND code.
+            report = evaluate(
+                report.verdicts,
+                report.deterministic_findings,
+                fail_on=fail_on.value,
+                guidelines_available=report.guidelines_available,
+                panels=report.panels,
+                code_findings=code_findings,
+            )
 
-    if pages:
-        # Deterministic reachability only (no jury on the verify path). code_path
-        # is intentionally NOT forwarded: the profile is only used by the jury,
-        # so forwarding it would re-run the code analyzer for nothing. Rebuild the
-        # gate preserving any code findings already folded in above.
-        page_findings, _pc, _ju = _run_pages(
-            meta=meta, code_path=None, jury=False,
-            judges_path=None, consensus=DEFAULT_POLICY, pages_dir=pages_dir, fail_on=fail_on.value,
-        )
-        report = evaluate(
-            report.verdicts,
-            report.deterministic_findings,
-            fail_on=fail_on.value,
-            guidelines_available=report.guidelines_available,
-            panels=report.panels,
-            code_findings=report.code_findings,
-            page_findings=page_findings,
-        )
+        if pages:
+            # Deterministic reachability only (no jury on the verify path). code_path
+            # is intentionally NOT forwarded: the profile is only used by the jury,
+            # so forwarding it would re-run the code analyzer for nothing. Rebuild the
+            # gate preserving any code findings already folded in above.
+            with span("pages"):
+                page_findings, _pc, _ju = _run_pages(
+                    meta=meta, code_path=None, jury=False,
+                    judges_path=None, consensus=DEFAULT_POLICY, pages_dir=pages_dir,
+                    fail_on=fail_on.value,
+                )
+            report = evaluate(
+                report.verdicts,
+                report.deterministic_findings,
+                fail_on=fail_on.value,
+                guidelines_available=report.guidelines_available,
+                panels=report.panels,
+                code_findings=report.code_findings,
+                page_findings=page_findings,
+            )
 
     if output_format is OutputFormat.html:
         stamped = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")

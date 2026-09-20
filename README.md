@@ -82,6 +82,21 @@ The **text judge** runs only when `ANTHROPIC_API_KEY` is set (or a model is inje
 
 Exit code is `1` on `BLOCK`, `0` otherwise — so it gates a fastlane pipeline. Run `logfire auth` to see the full source→gate trace.
 
+#### Tracing
+
+One run is one trace: a `verify` root span over `metadata` (with `ingest` / `deterministic` / `guidelines` / `judge` / `vision` / `gate` beneath it), plus `code` and `pages` when those stages are enabled. Configuration is idempotent, so composing commands never discards an in-flight span.
+
+With `LOGFIRE_TOKEN` set the trace goes to Logfire. Without it nothing leaves the process — and since Logfire is OpenTelemetry underneath, you can still see the trace by pointing it at any OTLP collector, no account required:
+
+```bash
+docker run -d --name jaeger -p 16686:16686 jaegertracing/all-in-one
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+OTEL_SERVICE_NAME=asc-metadata-verifier \
+  asc-verify verify ./fastlane --code ./MyApp --pages   # then open localhost:16686
+```
+
+`tests/test_cli_tracing.py` asserts the tree itself, capturing spans with a plain OTel in-memory exporter (`logfire.testing` imports pytest, so it is unavailable in a `--no-dev` install).
+
 ### Example
 
 `tests/fixtures/fastlane_flawed/` is a deliver root with four planted issues (over-limit app name, placeholder text, an Android mention, a price in the description). `tests/test_e2e.py` drives the real CLI against it end-to-end, offline (a stubbed judge stands in for the real LLM call, so no network/key is needed), producing this actual report — reproduced verbatim (the `guideline` fields read `n/a` *because this run has no live guidelines text*; per the honesty bar, `guideline_ref` is only ever populated from grounding the judge actually saw, never invented):

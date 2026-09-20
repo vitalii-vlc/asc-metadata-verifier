@@ -8,6 +8,27 @@ Built on the Pydantic tooling stack: **pydantic-ai** (the judge) · **pydantic-e
 >
 > **Honestly unvalidated:** the ASC-API adapter is tested only against **mocked `httpx`** (no live App Store Connect credentials were used), and the vision judge is tested only against a **`FunctionModel` stub** (no real-model vision run). Per the honesty bar, no accuracy numbers are claimed that weren't measured.
 
+## Contents
+
+- [Why](#why)
+- [How it works](#how-it-works)
+- [What it checks](#what-it-checks)
+- [Install](#install)
+  - [With Claude Code](#with-claude-code)
+  - [Manually](#manually)
+- [Usage](#usage)
+  - [Tracing](#tracing)
+  - [Example](#example)
+- [Multi-LLM jury (optional)](#multi-llm-jury-optional)
+- [Persistence (optional)](#persistence-optional)
+- [Code analysis (optional)](#code-analysis-optional)
+- [Pages analysis (optional)](#pages-analysis-optional)
+- [HTML report (optional)](#html-report-optional)
+- [The eval-science backbone](#the-eval-science-backbone)
+- [The bundled Claude skill](#the-bundled-claude-skill)
+- [Development](#development)
+- [License](#license)
+
 ## Why
 
 App Store metadata rejections cost days: you submit, wait for review, get rejected for something a checklist could have caught (an Android mention in the description, a price in the wrong field, placeholder text that shipped by accident), fix it, and re-queue. This gates that class of problem *before* submission — and does it where a regex can't: judging phrasing, claims, and screenshots against the *current* guidelines.
@@ -41,18 +62,58 @@ App Store metadata rejections cost days: you submit, wait for review, get reject
 
 ## Install
 
-```bash
-uv add asc-metadata-verifier
-uvx library-skills --claude   # discovers + installs the bundled `app-store-review-gate` skill into ~/.claude/skills
+> Not published to PyPI yet — install from git. Needs Python ≥ 3.11 and `git` on `PATH`.
+
+### With Claude Code
+
+Paste this into Claude Code **from your iOS app's repository**. It installs the CLI, wires up the bundled skill, and runs the gate on your metadata:
+
+```text
+Set up the App Store review gate in this project.
+
+1. Install the CLI as a standalone tool, so my project's own dependencies are
+   untouched (this project may not even be Python). It is NOT on PyPI, so
+   install it from git:
+
+     uv tool install "asc-metadata-verifier[code] @ git+https://github.com/vitalii-vlc/asc-metadata-verifier"
+
+   No uv? Use pipx with the same "package @ git+url" spec. The [code] extra
+   pulls in the tree-sitter grammars the source-code analyzer needs; drop it
+   if you only want the metadata checks. Confirm with `asc-verify --help`.
+
+2. Install the bundled `app-store-review-gate` skill so you can run this gate
+   yourself in future sessions. It ships inside the installed package:
+
+     mkdir -p ~/.claude/skills
+     cp -r "$(find "$(uv tool dir)" -type d -name app-store-review-gate)" ~/.claude/skills/
+
+   Copy the whole directory, not just SKILL.md.
+
+3. The LLM judge needs ANTHROPIC_API_KEY. asc-verify auto-loads a .env from
+   the working directory or a parent. If the key isn't already in my
+   environment, tell me to add it to .env myself — do not ask me to paste the
+   key to you — and make sure .env is gitignored.
+
+4. Find this repo's fastlane deliver root (the parent of metadata/ and
+   screenshots/) and the app's source root, then run the full gate:
+
+     asc-verify verify <deliver-root> --code <source-root> --pages
+
+5. Report the PASS / WARN / BLOCK verdict and walk me through the findings
+   worst-first, quoting the offending text and the guideline reference for
+   each. Exit code is 1 on BLOCK, 0 otherwise. Do not offer to submit to the
+   App Store while the verdict is BLOCK.
 ```
 
-Plain `uvx library-skills` (no flag) targets the generic `.agents/skills` directory, which Claude Code doesn't read — Claude Code users need `--claude` (or select `.claude/skills` when prompted).
-
-**Manual fallback** (no `library-skills` available) — copy the **whole skill directory**, not just `SKILL.md`:
+### Manually
 
 ```bash
-cp -r site-packages/asc_metadata_verifier/.agents/skills/app-store-review-gate ~/.claude/skills/
+uv tool install "asc-metadata-verifier[code] @ git+https://github.com/vitalii-vlc/asc-metadata-verifier"
+mkdir -p ~/.claude/skills
+cp -r "$(find "$(uv tool dir)" -type d -name app-store-review-gate)" ~/.claude/skills/
 ```
+
+To install it as a **project dependency** instead of a standalone tool, `uv add "asc-metadata-verifier @ git+https://github.com/vitalii-vlc/asc-metadata-verifier"`, then `uvx library-skills --claude` discovers and installs the bundled skill into `~/.claude/skills`. Plain `uvx library-skills` (no flag) targets the generic `.agents/skills` directory, which Claude Code doesn't read — Claude Code users need `--claude` (or select `.claude/skills` when prompted).
 
 ## Usage
 
@@ -82,7 +143,7 @@ The **text judge** runs only when `ANTHROPIC_API_KEY` is set (or a model is inje
 
 Exit code is `1` on `BLOCK`, `0` otherwise — so it gates a fastlane pipeline. Run `logfire auth` to see the full source→gate trace.
 
-#### Tracing
+### Tracing
 
 One run is one trace: a `verify` root span over `metadata` (with `ingest` / `deterministic` / `guidelines` / `judge` / `vision` / `gate` beneath it), plus `code` and `pages` when those stages are enabled. Configuration is idempotent, so composing commands never discards an in-flight span.
 
